@@ -368,80 +368,1937 @@
 
 
     <script>
-        // --- DATA & STATE ---
-        const BIOMES = { land: { name: 'Land' }, water: { name: 'Water' } };
+// --- DATA & STATE ---
+const BIOMES = { land: { name: 'Land' }, water: { name: 'Water' } };
+
+// --- Single Source of Truth for Game Data ---
+let GDD = {
+    Resources: {
+        dragonboneTimber: { name: "Dragonbone Timber", icon: "🌲", rarity: "Common" },
+        primordialMire:   { name: "Primordial Mire",   icon: "🧱", rarity: "Common" },
+        earthRootRock:    { name: "Earth-Root Rock",   icon: "🗿", rarity: "Common" },
+        dwarfForgedIron:  { name: "Dwarf-Forged Iron", icon: "⚙️", rarity: "Common" },
+        rawhide:          { name: "Rawhide",           icon: "🐄", rarity: "Common" },
+        duneTitanDust:     { name: "Dune-Titan Dust",     icon: "⏳", rarity: "Rare" },
+        infernalEmberlump: { name: "Infernal Emberlump", icon: "🔥", rarity: "Rare" },
+        astralDust:        { name: "Astral Dust",         icon: "✨", rarity: "Rare" },
+        voidheartAdamant:  { name: "Void-Heart Adamant",  icon: "🌑", rarity: "Epic" },
+        titansbloodOre:    { name: "Titans-Blood Ore",    icon: "🩸", rarity: "Epic" },
+        nightwhisperEssence: { name: "Night Whisper Essence", icon: "👻", rarity: "Epic" },
+        seraphicPlatinum:  { name: "Seraphic Platinum",   icon: "🕊️", rarity: "Epic" },
+        worldShard:        { name: "World Shard",         icon: "💠", rarity: "Epic" },
+        ironIngot:         { name: "Iron Ingot",          icon: "🔩", rarity: "Refined" },
+        tannedLeather:     { name: "Tanned Leather",      icon: "📜", rarity: "Refined" }
+    },
+    RarityWeights: {
+        Common: 100,
+        Rare: 20,
+        Epic: 5,
+        Refined: 0, // Refined items should not spawn naturally
+    },
+    NodeDefinitions: {
+        resource_node: {
+            name_template: "{resourceName} Node",
+            base_amount_min: 50,
+            base_amount_max: 100,
+        },
+        world_shard_node: {
+            name: "World Shard Locus",
+            icon: "💠",
+            cooldown_hours: 1
+        }
+    },
+    Buildings: {},
+    Research: {},
+    WorldEvents: [],
+    GameConstants: {
+        PLAYER_STARTING_HEALTH: 100,
+        MAX_PARTY_SIZE: 4,
+        ESTATE_MOVE_COST: 1,
+        GATHER_DURATION_MS: 5000
+    }
+};
+// For convenience, we'll keep a direct reference to RESOURCES
+let RESOURCES = GDD.Resources;
+
+let game = { 
+    player: { name: "Hero", level: 250, icon: '👾', inventory: {}, estate: null, worldShards: 5, hasPlacedFirstEstate: false, research: {} }, 
+    worldMap: { q: 0, r: 0, selectedHex: null }, 
+    estateMap: { q: 0, r: 0, selectedHex: null }, 
+    currentView: 'menu',
+    dev: { freeMove: false }
+};
+let ui, worldManager, estateManager;
+
+// --- HELPER FUNCTIONS ---
+function extractJson(text) {
+    const jsonRegex = /```json\s*([\s\S]*?)\s*```/;
+    const match = text.match(jsonRegex);
+    if (match && match[1]) {
+        try {
+            return JSON.parse(match[1]);
+        } catch (e) {
+            console.error("Error parsing extracted JSON:", e, "Original text:", match[1]);
+            return null;
+        }
+    }
+    try {
+        return JSON.parse(text);
+    } catch (e) {
+        console.error("Error parsing raw text as JSON:", e, "Original text:", text);
+        return null;
+    }
+}
+
+// --- STORAGE MANAGER ---
+const StorageManager = {
+    saveWorld(grid, imageUrl) { const data = { grid: Array.from(grid.entries()), imageUrl: imageUrl }; localStorage.setItem('estate_world_map', JSON.stringify(data)); },
+    loadWorld() { const data = localStorage.getItem('estate_world_map'); if (!data) return null; const parsed = JSON.parse(data); return { grid: new Map(parsed.grid), imageUrl: parsed.imageUrl }; },
+    savePlayer() {
+        const playerToSave = JSON.parse(JSON.stringify(game.player));
+        if (playerToSave.estate && playerToSave.estate.backgroundUrl) {
+            playerToSave.estate.backgroundUrl = '';
+        }
+        localStorage.setItem('estate_player_data', JSON.stringify(playerToSave));
+    },
+    loadPlayer() { const data = localStorage.getItem('estate_player_data'); if(data) { const loadedPlayer = JSON.parse(data); game.player = { ...game.player, ...loadedPlayer }; } },
+    saveGDD() { localStorage.setItem('estate_gdd', JSON.stringify(GDD)); },
+    loadGDD() {
+        const data = localStorage.getItem('estate_gdd');
+        if (data) {
+            const loadedGDD = JSON.parse(data);
+            // Deep merge to preserve top-level keys if they don't exist in saved data
+            GDD = {...GDD, ...loadedGDD};
+            RESOURCES = GDD.Resources; // Re-assign reference
+        } else {
+            // Load default GDD if nothing is saved
+            GDD.Buildings = {
+                townHall: { name: "Town Hall", icon: "🏛️", maxLevel: 10, upgrades: { 1: { cost: {}, benefit: { type: 'TIER_UNLOCK', details: { tier: 1 } } }, 2: { cost: { dragonboneTimber: 700, primordialMire: 700, earthRootRock: 700, dwarfForgedIron: 700, duneTitanDust: 700 }, benefit: { type: 'TIER_UNLOCK', details: { tier: 2 } } }, }},
+                warehouse: { name: "Warehouse", icon: "📦", maxLevel: 10, upgrades: { 1: { cost: {}, benefit: { type: 'STORAGE_CAPACITY', details: { amount: 1000 } } }, 2: { requires: { townHall: 1 }, cost: { dragonboneTimber: 500, earthRootRock: 500 }, benefit: { type: 'STORAGE_CAPACITY', details: { amount: 2000 } } }, }},
+                researchLab: { name: "Research Lab", icon: "🔬", maxLevel: 1, upgrades: { 1: { requires: { townHall: 1 }, cost: { astralDust: 100, ironIngot: 100 }, benefit: { type: 'UNLOCK', details: { feature: 'Research' } } } } },
+                bank: { name: "Estate Bank", icon: "🏦", maxLevel: 1, upgrades: { 1: { requires: { townHall: 1 }, cost: { ironIngot: 500, worldShard: 1 }, benefit: { type: 'UNLOCK', details: { feature: 'Banking' } } } } },
+                questBoard: { name: "Quest Board", icon: "📜", maxLevel: 1, upgrades: { 1: { requires: { townHall: 1 }, cost: { dragonboneTimber: 200, rawhide: 50 }, benefit: { type: 'UNLOCK', details: { feature: 'Quests' } } } } },
+                lumberMill: { name: "Lumber Mill", type: "GENERATOR", icon: "🌲", maxLevel: 10, upgrades: { 1: { requires: { townHall: 1 }, cost: {}, benefit: { type: 'PASSIVE_RATE', details: { resource: 'dragonboneTimber', amount: 15 } } }, 2: { requires: { townHall: 1 }, cost: { dragonboneTimber: 400, earthRootRock: 300 }, benefit: { type: 'PASSIVE_RATE', details: { resource: 'dragonboneTimber', amount: 26 } } }, }},
+                mine: { name: "Mine", type: "GENERATOR", icon: "⚙️", maxLevel: 10, upgrades: { 1: { requires: { townHall: 1 }, cost: {}, benefit: { type: 'PASSIVE_RATE', details: { resource: 'dwarfForgedIron', amount: 10 } } }, 2: { requires: { townHall: 1 }, cost: { dragonboneTimber: 500, earthRootRock: 500 }, benefit: { type: 'PASSIVE_RATE', details: { resource: 'dwarfForgedIron', amount: 20 } } }, }},
+                quarry: { name: "Quarry", type: "GENERATOR", icon: "🗿", maxLevel: 10, upgrades: { 1: { requires: { townHall: 1 }, cost: {}, benefit: { type: 'PASSIVE_RATE', details: { resource: 'earthRootRock', amount: 15 } } }, 2: { requires: { townHall: 1 }, cost: { dragonboneTimber: 400, earthRootRock: 300 }, benefit: { type: 'PASSIVE_RATE', details: { resource: 'earthRootRock', amount: 26 } } }, }},
+                blacksmith: { name: "Blacksmith", icon: "🔥", maxLevel: 10, upgrades: { 1: { requires: { townHall: 1 }, cost: { ironIngot: 100, earthRootRock: 250 }, benefit: { type: 'REFINEMENT', details: { from: 'dwarfForgedIron', to: 'ironIngot', ratio: 5 } } } } },
+                tannery: { name: "Tannery", icon: "📜", maxLevel: 10, upgrades: { 1: { requires: { townHall: 1 }, cost: { dragonboneTimber: 250, earthRootRock: 100 }, benefit: { type: 'REFINEMENT', details: { from: 'rawhide', to: 'tannedLeather', ratio: 5 } } } } },
+                barracks: { name: "Barracks", icon: "⚔️", maxLevel: 10, upgrades: { 1: { requires: { townHall: 1 }, cost: { earthRootRock: 250, ironIngot: 200 }, benefit: { type: 'PLAYER_STAT', details: { stat: 'itemClass', value: 1 } } }, }},
+            };
+            GDD.Research = {
+                combat: { name: "Combat Expertise", icon: "⚔️", items: { wc: { name: "Weapon Class", icon: "⚔️", maxLevel: 10, upgrades: { 1: { cost: { ironIngot: 10 }, bonus: 0.01 }, 2: { cost: { ironIngot: 20 }, bonus: 0.02 } } }, sc: { name: "Spell Class", icon: "✨", maxLevel: 10, upgrades: { 1: { cost: { astralDust: 10 }, bonus: 0.01 }, 2: { cost: { astralDust: 20 }, bonus: 0.02 } } }, hit: { name: "Hit Chance", icon: "🎯", maxLevel: 10, upgrades: { 1: { cost: { ironIngot: 5, astralDust: 5 }, bonus: 0.01 }, 2: { cost: { ironIngot: 10, astralDust: 10 }, bonus: 0.02 } } } } },
+                economy: { name: "Economy", icon: "💰", items: { resourceYield: { name: "Node Yield", icon: "💰", maxLevel: 10, upgrades: { 1: { cost: { dragonboneTimber: 100 }, bonus: 0.05 }, 2: { cost: { dragonboneTimber: 200 }, bonus: 0.1 } } }, passiveYield: { name: "Estate Yield", icon: "🏡", maxLevel: 10, upgrades: { 1: { cost: { earthRootRock: 100 }, bonus: 0.05 }, 2: { cost: { earthRootRock: 200 }, bonus: 0.1 } } }, gatheringSpeed: { name: "Gathering Speed", icon: "⏱️", maxLevel: 10, upgrades: { 1: { cost: { primordialMire: 100 }, bonus: 0.1 }, 2: { cost: { primordialMire: 200 }, bonus: 0.2 } } } } },
+                growth: { name: "Growth", icon: "📈", items: { xpGain: { name: "XP Gain", icon: "⭐", maxLevel: 10, upgrades: { 1: { cost: { worldShard: 1 }, bonus: 0.05 }, 2: { cost: { worldShard: 2 }, bonus: 0.1 } } }, goldGain: { name: "Gold Find", icon: "🪙", maxLevel: 10, upgrades: { 1: { cost: { worldShard: 1 }, bonus: 0.05 }, 2: { cost: { worldShard: 2 }, bonus: 0.1 } } }, dropRate: { name: "Drop Rate", icon: "🎁", maxLevel: 10, upgrades: { 1: { cost: { worldShard: 1 }, bonus: 0.05 }, 2: { cost: { worldShard: 2 }, bonus: 0.1 } } } } }
+            };
+        }
+    },
+    clearAllData() { localStorage.removeItem('estate_player_data'); localStorage.removeItem('estate_world_map'); localStorage.removeItem('estate_gdd'); }
+};
+
+// --- SHARED HEXAGONAL GRID LOGIC ---
+const Hex = { 
+    hexToPixel: (q, r, size) => ({ x: size * Math.sqrt(3) * (q + r / 2), y: size * 1.5 * r }), 
+    pixelToHex(x, y, size) { const q = (Math.sqrt(3)/3 * x - 1/3 * y) / size; const r = (2/3 * y) / size; return this.hexRound(q, r); }, 
+    hexRound(fq, fr) { const fs = -fq - fr; let q = Math.round(fq), r = Math.round(fr), s = Math.round(fs); const q_d = Math.abs(q - fq), r_d = Math.abs(r - fr), s_d = Math.abs(s - fs); if (q_d > r_d && q_d > s_d) q = -r - s; else if (r_d > s_d) r = -q - s; return { q, r }; },
+    distance(a, b) { return (Math.abs(a.q - b.q) + Math.abs(a.q + a.r - b.q - b.r) + Math.abs(a.r - b.r)) / 2; }
+};
+
+// --- MAP GENERATION LOGIC ---
+const MapGenerator = {
+    generateFromImage(grid, image, hexSize) {
+        grid.clear();
+        const tempCanvas = document.createElement('canvas'); tempCanvas.width = image.width; tempCanvas.height = image.height;
+        const ctx = tempCanvas.getContext('2d'); ctx.drawImage(image, 0, 0);
+        const imageData = ctx.getImageData(0, 0, image.width, image.height).data;
+        const step = Math.max(1, Math.floor(hexSize / 2));
+        for (let y = 0; y < image.height; y += step) {
+            for (let x = 0; x < image.width; x += step) {
+                const i = (y * image.width + x) * 4;
+                const r = imageData[i], g = imageData[i+1], b = imageData[i+2];
+                const isWater = b > r + 20 && b > g + 20;
+                if (isWater) continue;
+                const worldX = x - image.width / 2; const worldY = y - image.height / 2;
+                const hexCoords = Hex.pixelToHex(worldX, worldY, hexSize);
+                const key = `${hexCoords.q},${hexCoords.r}`;
+                if (!grid.has(key)) { grid.set(key, { ...hexCoords, biome: 'land' }); }
+            }
+        }
+    },
+    getWeightedRandomResource() {
+        const weights = GDD.RarityWeights;
+        const spawnableResources = Object.entries(RESOURCES)
+            .filter(([id, res]) => res.rarity !== 'Refined' && id !== 'worldShard');
+
+        const weightedList = [];
+        let totalWeight = 0;
+
+        for (const [id, res] of spawnableResources) {
+            const weight = weights[res.rarity] || 0;
+            if (weight > 0) {
+                totalWeight += weight;
+                weightedList.push({ id, weight });
+            }
+        }
         
-        // --- Single Source of Truth for Game Data ---
-        let GDD = {
-            Resources: {
-                dragonboneTimber: { name: "Dragonbone Timber", icon: "🌲", rarity: "Common" },
-                primordialMire:   { name: "Primordial Mire",   icon: "🧱", rarity: "Common" },
-                earthRootRock:    { name: "Earth-Root Rock",   icon: "🗿", rarity: "Common" },
-                dwarfForgedIron:  { name: "Dwarf-Forged Iron", icon: "⚙️", rarity: "Common" },
-                rawhide:          { name: "Rawhide",           icon: "🐄", rarity: "Common" },
-                duneTitanDust:     { name: "Dune-Titan Dust",     icon: "⏳", rarity: "Rare" },
-                infernalEmberlump: { name: "Infernal Emberlump", icon: "🔥", rarity: "Rare" },
-                astralDust:        { name: "Astral Dust",         icon: "✨", rarity: "Rare" },
-                voidheartAdamant:  { name: "Void-Heart Adamant",  icon: "🌑", rarity: "Epic" },
-                titansbloodOre:    { name: "Titans-Blood Ore",    icon: "🩸", rarity: "Epic" },
-                nightwhisperEssence: { name: "Night Whisper Essence", icon: "👻", rarity: "Epic" },
-                seraphicPlatinum:  { name: "Seraphic Platinum",   icon: "🕊️", rarity: "Epic" },
-                worldShard:        { name: "World Shard",         icon: "💠", rarity: "Epic" },
-                ironIngot:         { name: "Iron Ingot",          icon: "🔩", rarity: "Refined" },
-                tannedLeather:     { name: "Tanned Leather",      icon: "📜", rarity: "Refined" }
-            },
-            RarityWeights: {
-                Common: 100,
-                Rare: 20,
-                Epic: 5,
-                Refined: 0,
-            },
-            NodeDefinitions: {
-                resource_node: {
-                    name_template: "{resourceName} Node",
-                    base_amount_min: 50,
-                    base_amount_max: 100,
-                },
-                world_shard_node: {
-                    name: "World Shard Locus",
-                    icon: "💠",
-                    cooldown_hours: 1
+        if (totalWeight === 0) return null;
+
+        let random = Math.random() * totalWeight;
+        for (const item of weightedList) {
+            random -= item.weight;
+            if (random <= 0) {
+                return item.id;
+            }
+        }
+        return null; // Should not happen if totalWeight > 0
+    },
+    placeFeatures(grid) {
+        const landHexes = Array.from(grid.values()).filter(h => h.biome === 'land' && !h.feature);
+        if (landHexes.length === 0) return;
+
+        const hasShardNode = Array.from(grid.values()).some(h => h.feature?.type === 'world_shard_node');
+        if (!hasShardNode && landHexes.length > 10) {
+            const shardNodeHex = landHexes.splice(Math.floor(Math.random() * landHexes.length), 1)[0];
+            if (shardNodeHex) {
+                const def = GDD.NodeDefinitions.world_shard_node;
+                shardNodeHex.feature = { type: 'world_shard_node', name: def.name, icon: def.icon, lastCollected: 0 };
+            }
+        }
+        
+        const nodeCount = Math.floor(landHexes.length * 0.1);
+        for(let i = 0; i < nodeCount; i++) {
+            if(landHexes.length === 0) break;
+            const hexIndex = Math.floor(Math.random() * landHexes.length);
+            const hex = landHexes.splice(hexIndex, 1)[0];
+            if (hex && !hex.feature) {
+                const randomKey = this.getWeightedRandomResource();
+                if (!randomKey) continue; // Skip if no resource could be chosen
+
+                const def = GDD.NodeDefinitions.resource_node;
+                const amount = def.base_amount_min + Math.floor(Math.random() * (def.base_amount_max - def.base_amount_min + 1));
+                hex.feature = { type: 'resource_node', name: def.name_template.replace('{resourceName}', RESOURCES[randomKey].name), resourceId: randomKey, amount: amount };
+            }
+        }
+    },
+    generateEstateMap(grid) {
+        const radius = 3;
+        for (let q = -radius; q <= radius; q++) {
+            for (let r = -radius; r <= radius; r++) {
+                if ((Math.abs(q) + Math.abs(r) + Math.abs(q + r)) / 2 > radius) continue;
+                grid.set(`${q},${r}`, { q, r });
+            }
+        }
+        const buildingTypes = Object.keys(GDD.Buildings);
+        const hexes = Array.from(grid.values());
+        for(let i = 0; i < hexes.length; i++) { if (buildingTypes[i]) hexes[i].buildingId = buildingTypes[i]; }
+    }
+};
+
+// --- BASE MAP MANAGER ---
+class MapManager {
+    constructor(canvas, hexSize) { this.canvas = canvas; this.ctx = canvas.getContext('2d'); this.hexSize = hexSize; this.grid = new Map(); this.zoom = 1; this.minZoom = 0.2; this.maxZoom = 5; this.offsetX = 0; this.offsetY = 0; this.isCameraLocked = true; this.isPointerDown = false; this.startPanCoords = { x: 0, y: 0 }; this.dragThreshold = 5; this.hasDragged = false; this.initialPinchDistance = 0; }
+    init(grid) { this.grid = grid; this.bindEventListeners(); this.resizeAndCenter(); }
+    bindEventListeners() {
+        this.canvas.parentElement.addEventListener('pointerdown', this.handlePointerDown.bind(this));
+        this.canvas.parentElement.addEventListener('pointermove', this.handlePointerMove.bind(this));
+        this.canvas.parentElement.addEventListener('pointerup', this.handlePointerUp.bind(this));
+        this.canvas.parentElement.addEventListener('pointercancel', this.handlePointerUp.bind(this));
+        this.canvas.addEventListener('wheel', this.handleWheelZoom.bind(this), { passive: false });
+        this.canvas.addEventListener('touchstart', this.handleTouchStart.bind(this), { passive: false });
+        this.canvas.addEventListener('touchmove', this.handleTouchMove.bind(this), { passive: false });
+        window.addEventListener('resize', this.resizeAndCenter.bind(this));
+    }
+    centerOnPlayer() {
+        const playerPos = game.currentView === 'world' ? game.worldMap : game.estateMap;
+        const { x, y } = Hex.hexToPixel(playerPos.q, playerPos.r, this.hexSize);
+        this.offsetX = (this.canvas.width / 2) - (x * this.zoom);
+        this.offsetY = (this.canvas.height / 2) - (y * this.zoom);
+    }
+    centerOnHex(q, r) {
+        const { x, y } = Hex.hexToPixel(q, r, this.hexSize);
+        this.offsetX = (this.canvas.width / 2) - (x * this.zoom);
+        this.offsetY = (this.canvas.height / 2) - (y * this.zoom);
+        this.isCameraLocked = false;
+    }
+    draw() {
+        if(this.isCameraLocked) {
+            this.centerOnPlayer();
+        }
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height); this.ctx.save();
+        this.ctx.translate(this.offsetX, this.offsetY); this.ctx.scale(this.zoom, this.zoom);
+        this.drawBackground(); this.grid.forEach(hex => this.drawHex(hex));
+        const playerPos = game.currentView === 'world' ? game.worldMap : game.estateMap;
+        this.drawPlayer(playerPos.q, playerPos.r); this.ctx.restore();
+    }
+    drawBackground() {}
+    drawHex(hex) {}
+    drawPlayer(q, r) {
+        const { x, y } = Hex.hexToPixel(q, r, this.hexSize);
+        this.ctx.save();
+        this.ctx.globalAlpha = 1.0; // Restored to full brightness
+        this.ctx.font = `${this.hexSize * 1.2}px sans-serif`;
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = 'middle';
+        this.ctx.fillText(game.player.icon, x, y);
+        this.ctx.restore();
+    }
+    resizeAndCenter() { this.canvas.width = this.canvas.parentElement.clientWidth; this.canvas.height = this.canvas.parentElement.clientHeight; this.centerOnPlayer(); }
+    handlePointerDown(e) {
+        if (e.target.closest('#hex-tooltip') || e.target.closest('#estate-tooltip')) {
+            return; 
+        }
+        this.isPointerDown = true;
+        this.hasDragged = false;
+        this.canvas.style.cursor = 'grabbing';
+        this.startPanCoords = { x: e.clientX, y: e.clientY };
+    }
+    handlePointerMove(e) { if (!this.isPointerDown) return; const dx = e.clientX - this.startPanCoords.x; const dy = e.clientY - this.startPanCoords.y; if (!this.hasDragged && (Math.abs(dx) > this.dragThreshold || Math.abs(dy) > this.dragThreshold)) { this.hasDragged = true; this.isCameraLocked = false; } if(this.hasDragged) { this.offsetX += dx; this.offsetY += dy; this.startPanCoords = { x: e.clientX, y: e.clientY }; } }
+    handlePointerUp(e) { if(!this.isPointerDown) return; this.isPointerDown = false; this.canvas.style.cursor = 'grab'; if (!this.hasDragged) { this.processClick(e); } }
+    handleWheelZoom(e) { e.preventDefault(); const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9; this.zoomAtPoint(zoomFactor, e.clientX, e.clientY); }
+    handleTouchStart(e) { if (e.touches.length === 2) { e.preventDefault(); this.initialPinchDistance = this.getTouchDistance(e.touches); } }
+    handleTouchMove(e) { if (e.touches.length === 2) { e.preventDefault(); const currentDist = this.getTouchDistance(e.touches); const zoomFactor = currentDist / this.initialPinchDistance; const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2; const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2; this.zoomAtPoint(zoomFactor, midX, midY); this.initialPinchDistance = currentDist; } }
+    getTouchDistance(touches) { const dx = touches[0].clientX - touches[1].clientX; const dy = touches[0].clientY - touches[1].clientY; return Math.sqrt(dx * dx + dy * dy); }
+    zoomAtPoint(zoomFactor, x, y) {
+        const newZoom = Math.max(this.minZoom, Math.min(this.maxZoom, this.zoom * zoomFactor));
+        const rect = this.canvas.getBoundingClientRect();
+        const mouseX = x - rect.left; const mouseY = y - rect.top;
+        const worldX = (mouseX - this.offsetX) / this.zoom; const worldY = (mouseY - this.offsetY) / this.zoom;
+        this.zoom = newZoom;
+        this.offsetX = mouseX - worldX * this.zoom; this.offsetY = mouseY - worldY * this.zoom;
+    }
+    processClick(e) {
+        const rect = this.canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+        const worldX = (mouseX - this.offsetX) / this.zoom;
+        const worldY = (mouseY - this.offsetY) / this.zoom;
+        const { q, r } = Hex.pixelToHex(worldX, worldY, this.hexSize);
+        this.handleClickOnHex(q, r, {x: e.clientX, y: e.clientY});
+    }
+    handleClickOnHex(q, r, screenPos) {}
+}
+
+// --- WORLD MAP MANAGER ---
+class WorldMap extends MapManager {
+    constructor(canvas) { super(canvas, 5); this.image = null; this.gatheringTimer = null; this.gatheringInterval = null; }
+    init(grid, image) { this.image = image; super.init(grid); }
+    drawBackground() { if (!this.image) return; const imgX = -this.image.width / 2; const imgY = -this.image.height / 2; this.ctx.drawImage(this.image, imgX, imgY); }
+    drawHex(hex) {
+        const { x, y } = Hex.hexToPixel(hex.q, hex.r, this.hexSize);
+        this.ctx.beginPath(); for (let i = 0; i < 6; i++) { const angle = Math.PI / 180 * (60 * i + 30); this.ctx[i === 0 ? 'moveTo' : 'lineTo'](x + this.hexSize * Math.cos(angle), y + this.hexSize * Math.sin(angle)); } this.ctx.closePath();
+        
+        const isSelected = game.worldMap.selectedHex && game.worldMap.selectedHex.q === hex.q && game.worldMap.selectedHex.r === hex.r;
+
+        if (isSelected) {
+            this.ctx.save();
+            this.ctx.shadowBlur = 20;
+            this.ctx.shadowColor = 'rgba(103, 232, 249, 0.5)';
+            this.ctx.strokeStyle = 'rgba(103, 232, 249, 0.8)';
+            this.ctx.lineWidth = 1;
+        } else {
+            this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+            this.ctx.lineWidth = 0.2;
+        }
+        
+        this.ctx.stroke();
+        if (isSelected) this.ctx.restore();
+
+        if (hex.feature) {
+            if (hex.feature.type === 'estate_plot') {
+                this.ctx.save();
+                const glow = 25 + Math.sin(Date.now() / 250) * 10;
+                this.ctx.shadowBlur = glow;
+                this.ctx.shadowColor = '#fff';
+            }
+            const icon = hex.feature.icon || RESOURCES[hex.feature.resourceId]?.icon || '❓';
+            this.ctx.font = `${this.hexSize * 1.2}px sans-serif`; this.ctx.textAlign = 'center'; this.ctx.textBaseline = 'middle'; this.ctx.fillText(icon, x, y);
+            if (hex.feature.type === 'estate_plot') { this.ctx.restore(); }
+        }
+    }
+    handleClickOnHex(q, r, screenPos) {
+        const hex = this.grid.get(`${q},${r}`);
+        if (!hex) return;
+        
+        const distanceToPlayer = Hex.distance(game.worldMap, hex);
+        const isPlayerOnHex = distanceToPlayer === 0;
+        const isSelectedHex = game.worldMap.selectedHex && game.worldMap.selectedHex.q === q && game.worldMap.selectedHex.r === r;
+
+        // If clicking the same hex the player is on, show the tooltip for interaction.
+        if (isPlayerOnHex && isSelectedHex) {
+            this.showTooltip(hex, screenPos, true);
+            return;
+        }
+
+        game.worldMap.selectedHex = { q, r };
+
+        // Handle Movement
+        if (game.dev.freeMove || distanceToPlayer === 1) {
+            this.cancelGathering();
+            this.isCameraLocked = true;
+            game.worldMap.q = q;
+            game.worldMap.r = r;
+            ui.worldMap.tooltip.container.classList.add('hidden'); // Hide tooltip on move
+            return; 
+        }
+
+        // Handle Scouting Tooltip (clicking a non-adjacent hex)
+        if (hex.feature) {
+            this.showTooltip(hex, screenPos, false);
+        } else {
+            ui.worldMap.tooltip.container.classList.add('hidden');
+        }
+    }
+    showTooltip(hex, screenPos, isPlayerOnHex) {
+        const tip = ui.worldMap.tooltip;
+        this.hideAllTooltipButtons();
+        tip.name.textContent = hex.feature ? hex.feature.name : 'Open Land';
+        tip.biome.textContent = `(${hex.q}, ${hex.r})`;
+        tip.resource.textContent = '';
+
+        if (hex.feature) {
+            switch(hex.feature.type) {
+                case 'resource_node':
+                    tip.resource.textContent = `Amount: ${hex.feature.amount}`;
+                    tip.gatherBtn.classList.remove('hidden');
+                    tip.gatherBtn.disabled = !isPlayerOnHex;
+                    tip.gatherBtn.onclick = () => this.startGathering(hex);
+                    break;
+                case 'estate_plot':
+                    tip.enterBtn.classList.remove('hidden');
+                    tip.enterBtn.disabled = !isPlayerOnHex;
+                    tip.enterBtn.onclick = () => enterEstate();
+                    break;
+                case 'world_shard_node':
+                    this.handleShardNodeTooltip(hex, isPlayerOnHex);
+                    break;
+            }
+        } else { // Open Land, only show buttons if player is on it
+             if (isPlayerOnHex) {
+                if (!game.player.hasPlacedFirstEstate) {
+                    tip.foundEstateBtn.classList.remove('hidden');
+                    tip.foundEstateBtn.onclick = () => this.placeInitialEstate(hex);
+                } else {
+                    tip.moveEstateBtn.classList.remove('hidden');
+                    tip.moveEstateBtn.textContent = `Move Estate Here (Cost: ${GDD.GameConstants.ESTATE_MOVE_COST} 💠)`;
+                    tip.moveEstateBtn.onclick = () => this.attemptMoveEstate(hex);
                 }
-            },
-            Buildings: {},
-            Research: {},
-            WorldEvents: [],
-            GameConstants: {
-                PLAYER_STARTING_HEALTH: 100,
-                MAX_PARTY_SIZE: 4,
-                ESTATE_MOVE_COST: 1,
-                GATHER_DURATION_MS: 5000
+            }
+        }
+
+        const mapRect = ui.worldMap.canvas.getBoundingClientRect();
+        let left = screenPos.x - mapRect.left - (tip.container.offsetWidth / 2);
+        let top = screenPos.y - mapRect.top + 20;
+
+        if (left < 10) left = 10;
+        if (left + tip.container.offsetWidth > window.innerWidth - 10) {
+            left = window.innerWidth - tip.container.offsetWidth - 10;
+        }
+        if (top + tip.container.offsetHeight > window.innerHeight - 10) {
+            top = screenPos.y - mapRect.top - tip.container.offsetHeight - 20;
+        }
+
+        tip.container.style.left = `${left}px`;
+        tip.container.style.top = `${top}px`;
+        tip.container.classList.remove('hidden');
+    }
+    hideAllTooltipButtons() {
+        ui.worldMap.tooltip.gatherBtn.classList.add('hidden');
+        ui.worldMap.tooltip.enterBtn.classList.add('hidden');
+        ui.worldMap.tooltip.moveEstateBtn.classList.add('hidden');
+        ui.worldMap.tooltip.foundEstateBtn.classList.add('hidden');
+        ui.worldMap.tooltip.harvestShardBtn.classList.add('hidden');
+    }
+    startGathering(hex) {
+        if (this.gatheringTimer) return;
+
+        const bonus = ResearchManager.getResearchBonus('gatheringSpeed');
+        const duration = GDD.GameConstants.GATHER_DURATION_MS * (1 - bonus);
+        let timeLeft = duration;
+
+        const gatherBtn = ui.worldMap.tooltip.gatherBtn;
+        gatherBtn.disabled = true;
+
+        this.gatheringInterval = setInterval(() => {
+            timeLeft -= 100;
+            gatherBtn.textContent = `Gathering... ${(timeLeft / 1000).toFixed(1)}s`;
+            if (timeLeft <= 0) {
+                clearInterval(this.gatheringInterval);
+            }
+        }, 100);
+
+        this.gatheringTimer = setTimeout(() => {
+            this.completeGathering(hex);
+        }, duration);
+    }
+    completeGathering(hex) {
+        clearInterval(this.gatheringInterval);
+        clearTimeout(this.gatheringTimer);
+        this.gatheringTimer = null;
+        this.gatheringInterval = null;
+
+        gatherResource(hex);
+
+        const gatherBtn = ui.worldMap.tooltip.gatherBtn;
+        gatherBtn.disabled = false;
+        gatherBtn.textContent = "Gather";
+        ui.worldMap.tooltip.container.classList.add('hidden');
+    }
+    cancelGathering() {
+        if (this.gatheringTimer) {
+            clearInterval(this.gatheringInterval);
+            clearTimeout(this.gatheringTimer);
+            this.gatheringTimer = null;
+            this.gatheringInterval = null;
+            
+            const gatherBtn = ui.worldMap.tooltip.gatherBtn;
+            gatherBtn.disabled = false;
+            gatherBtn.textContent = "Gather";
+        }
+    }
+    handleShardNodeTooltip(hex, isPlayerOnHex) {
+        const now = Date.now();
+        const cooldownHours = GDD.NodeDefinitions.world_shard_node.cooldown_hours;
+        const hoursSinceCollected = (now - (hex.feature.lastCollected || 0)) / 3600000;
+        const canHarvest = hoursSinceCollected >= cooldownHours;
+        ui.worldMap.tooltip.harvestShardBtn.classList.remove('hidden');
+        ui.worldMap.tooltip.harvestShardBtn.disabled = !canHarvest || !isPlayerOnHex;
+        if (canHarvest) {
+            ui.worldMap.tooltip.resource.textContent = "Ready to Harvest!";
+            ui.worldMap.tooltip.harvestShardBtn.textContent = "Harvest World Shard";
+        } else {
+            const minutesLeft = Math.ceil((cooldownHours - hoursSinceCollected) * 60);
+            ui.worldMap.tooltip.resource.textContent = `Harvests in ${minutesLeft} min`;
+            ui.worldMap.tooltip.harvestShardBtn.textContent = "Harvesting...";
+        }
+        ui.worldMap.tooltip.harvestShardBtn.onclick = () => this.harvestShard(hex);
+    }
+    harvestShard(hex) {
+        hex.feature.lastCollected = Date.now();
+        game.player.worldShards++;
+        StorageManager.savePlayer();
+        StorageManager.saveWorld(this.grid, this.image.src);
+        updateGameUI();
+        this.handleShardNodeTooltip(hex, true);
+    }
+    placeInitialEstate(hex) {
+        hex.feature = { type: 'estate_plot', name: 'Estates Hill', icon: '🏡' };
+        game.player.hasPlacedFirstEstate = true;
+        this.movePlayerNextTo(hex);
+        StorageManager.savePlayer();
+        StorageManager.saveWorld(this.grid, this.image.src);
+        ui.worldMap.tooltip.container.classList.add('hidden');
+    }
+    attemptMoveEstate(newHex) {
+        const cost = GDD.GameConstants.ESTATE_MOVE_COST;
+        if (game.player.worldShards >= cost) {
+            game.player.worldShards -= cost;
+            for (const [key, hex] of this.grid.entries()) {
+                if (hex.feature?.type === 'estate_plot') {
+                    delete hex.feature;
+                    break;
+                }
+            }
+            newHex.feature = { type: 'estate_plot', name: 'Estates Hill', icon: '🏡' };
+            this.movePlayerNextTo(newHex);
+            StorageManager.savePlayer();
+            StorageManager.saveWorld(this.grid, this.image.src);
+            updateGameUI();
+            ui.worldMap.tooltip.container.classList.add('hidden');
+        } else {
+            alert(`You need ${cost} World Shard(s) to move your estate.`);
+        }
+    }
+    movePlayerNextTo(estateHex) {
+        const directions = [ { q: 1, r: 0 }, { q: 1, r: -1 }, { q: 0, r: -1 }, { q: -1, r: 0 }, { q: -1, r: 1 }, { q: 0, r: 1 } ];
+        for (const dir of directions) {
+            const neighborQ = estateHex.q + dir.q;
+            const neighborR = estateHex.r + dir.r;
+            const neighborKey = `${neighborQ},${neighborR}`;
+            const neighborHex = this.grid.get(neighborKey);
+            if (neighborHex && !neighborHex.feature) {
+                game.worldMap.q = neighborQ;
+                game.worldMap.r = neighborR;
+                return;
+            }
+        }
+        game.worldMap.q = estateHex.q;
+        game.worldMap.r = estateHex.r;
+    }
+}
+
+// --- ESTATE MANAGER ---
+class EstateMap extends MapManager {
+    constructor(canvas) { super(canvas, 60); }
+    init(grid, estateName) { 
+        super.init(grid); 
+        this.isCameraLocked = true; // Pin the estate map view
+    }
+    drawHex(hex) {
+        const { x, y } = Hex.hexToPixel(hex.q, hex.r, this.hexSize);
+        this.ctx.beginPath(); for (let i = 0; i < 6; i++) { const angle = Math.PI / 180 * (60 * i + 30); this.ctx[i === 0 ? 'moveTo' : 'lineTo'](x + this.hexSize * Math.cos(angle), y + this.hexSize * Math.sin(angle)); } this.ctx.closePath();
+        
+        const isSelected = game.estateMap.selectedHex && game.estateMap.selectedHex.q === hex.q && game.estateMap.selectedHex.r === hex.r;
+
+        this.ctx.fillStyle = 'rgba(50, 50, 50, 0.5)';
+        this.ctx.fill();
+
+        if (isSelected) {
+            this.ctx.save();
+            this.ctx.shadowBlur = 20;
+            this.ctx.shadowColor = 'rgba(103, 232, 249, 0.5)';
+            this.ctx.strokeStyle = 'rgba(103, 232, 249, 0.8)';
+            this.ctx.lineWidth = 1;
+        } else {
+            this.ctx.strokeStyle = 'rgba(202, 233, 234, 0.3)';
+            this.ctx.lineWidth = 1;
+        }
+        this.ctx.stroke();
+        if (isSelected) this.ctx.restore();
+
+        if (hex.buildingId) {
+            const building = GDD.Buildings[hex.buildingId];
+            this.ctx.font = `${this.hexSize * 0.5}px sans-serif`; this.ctx.textAlign = 'center'; this.ctx.textBaseline = 'middle';
+            this.ctx.fillText(building.icon || '🏛️', x, y);
+        }
+    }
+    handleClickOnHex(q, r, screenPos) {
+        const hex = this.grid.get(`${q},${r}`);
+        if (!hex) return;
+
+        const distanceToPlayer = Hex.distance(game.estateMap, {q, r});
+        const isPlayerOnHex = distanceToPlayer === 0;
+        const isSelectedHex = game.estateMap.selectedHex && game.estateMap.selectedHex.q === q && game.estateMap.selectedHex.r === r;
+
+        // If clicking the same hex the player is on, open the interaction modal.
+        if (isPlayerOnHex && isSelectedHex && hex.buildingId) {
+            ui.estate.tooltip.container.classList.add('hidden');
+            const building = GDD.Buildings[hex.buildingId];
+            if(building.type === 'GENERATOR') BuildingManager.showGeneratorModal(hex.buildingId);
+            else if(hex.buildingId === 'researchLab') ResearchManager.showResearchModal();
+            else if (hex.buildingId === 'bank') BankManager.showBankModal();
+            else if (hex.buildingId === 'questBoard') QuestManager.showQuestModal();
+            else BuildingManager.showUpgradeModal(hex.buildingId);
+            return;
+        }
+
+        game.estateMap.selectedHex = { q, r };
+
+        // Handle Movement
+        if (distanceToPlayer === 1) {
+            game.estateMap.q = q;
+            game.estateMap.r = r;
+            ui.estate.tooltip.container.classList.add('hidden'); // Hide tooltip on move
+            return; // End after moving
+        }
+
+        // Handle scouting tooltips for non-adjacent buildings
+        if (hex.buildingId && !isPlayerOnHex) {
+            this.showBuildingTooltip(hex, screenPos);
+        } else {
+            ui.estate.tooltip.container.classList.add('hidden');
+        }
+    }
+    showBuildingTooltip(hex, screenPos) {
+        const buildingConfig = GDD.Buildings[hex.buildingId];
+        if (!buildingConfig) return;
+
+        let level = 0;
+        const buildingData = game.player.estate.buildings[hex.buildingId];
+        if (typeof buildingData === 'object' && buildingData !== null) {
+            level = buildingData.level;
+        } else if (typeof buildingData === 'number') {
+            level = buildingData;
+        }
+
+        const tip = ui.estate.tooltip;
+        tip.name.textContent = buildingConfig.name;
+        tip.level.textContent = `Level: ${level}`;
+
+        const mapRect = this.canvas.getBoundingClientRect();
+        let left = screenPos.x - mapRect.left - (tip.container.offsetWidth / 2);
+        let top = screenPos.y - mapRect.top + 20;
+
+        if (left < 10) left = 10;
+        if (left + tip.container.offsetWidth > window.innerWidth - 10) {
+            left = window.innerWidth - tip.container.offsetWidth - 10;
+        }
+        if (top + tip.container.offsetHeight > window.innerHeight - 10) {
+            top = screenPos.y - mapRect.top - tip.container.offsetHeight - 20;
+        }
+
+        tip.container.style.left = `${left}px`;
+        tip.container.style.top = `${top}px`;
+        tip.container.classList.remove('hidden');
+    }
+    showMessage(text) { const box = ui.estate.messageBox; box.textContent = text; box.style.opacity = '1'; setTimeout(() => { box.style.opacity = '0'; }, 2000); }
+}
+
+// --- GAME CONTROLLERS ---
+function showLoading(message) { ui.loadingMessage.textContent = message; ui.loadingOverlay.classList.remove('hidden'); }
+function hideLoading() { ui.loadingOverlay.classList.add('hidden'); }
+
+function startWorldGeneration(imageUrl) {
+    showLoading("Generating world from image...");
+    const image = new Image();
+    image.crossOrigin = "Anonymous";
+    image.onload = () => {
+        const grid = new Map();
+        MapGenerator.generateFromImage(grid, image, worldManager.hexSize);
+        MapGenerator.placeFeatures(grid);
+        StorageManager.saveWorld(grid, imageUrl);
+        worldManager.init(grid, image);
+        hideLoading();
+        showWorld();
+    };
+    image.onerror = () => {
+        hideLoading();
+        ui.mainMenuStatus.textContent = "Error: Could not load image. Check URL and CORS policy.";
+    };
+    image.src = imageUrl;
+}
+
+function loadExistingWorld() {
+    const savedData = StorageManager.loadWorld();
+    if (!savedData) {
+        ui.mainMenuStatus.textContent = "No saved world found.";
+        return;
+    }
+    showLoading("Loading saved world...");
+    const image = new Image();
+    image.crossOrigin = "Anonymous";
+    image.onload = () => {
+        worldManager.init(savedData.grid, image);
+        const estateHex = Array.from(savedData.grid.values()).find(h => h.feature?.type === 'estate_plot');
+        if (estateHex) {
+            worldManager.movePlayerNextTo(estateHex);
+        }
+        hideLoading();
+        showWorld();
+    };
+    image.onerror = () => {
+        hideLoading();
+        ui.mainMenuStatus.textContent = "Error loading world's background image.";
+    };
+    image.src = savedData.imageUrl;
+}
+
+function showWorld() {
+    game.currentView = 'world';
+    ui.estate.container.classList.add('hidden');
+    ui.mainScreen.classList.add('hidden');
+    ui.worldMap.modal.classList.remove('hidden');
+    ui.inventory.ui.classList.add('hidden');
+    ui.storage.ui.classList.add('hidden');
+    ui.production.ui.classList.add('hidden');
+    
+    if (!worldManager.image) {
+        const savedData = StorageManager.loadWorld();
+        if (savedData && savedData.imageUrl) {
+            const image = new Image();
+            image.crossOrigin = "Anonymous";
+            image.onload = () => {
+                worldManager.image = image;
+                worldManager.resizeAndCenter();
+            };
+            image.src = savedData.imageUrl;
+        }
+    } else {
+         worldManager.resizeAndCenter();
+    }
+
+    updateGameUI();
+}
+
+function enterEstate() {
+    if (!game.player.estate) {
+        purchaseEstate();
+    }
+    
+    if (!game.player.estate.hasBeenSetup) {
+        ui.estateSetup.modal.classList.remove('hidden');
+    } else {
+        loadEstateView();
+    }
+}
+
+function loadEstateView() {
+    game.currentView = 'estate';
+    calculateOfflineProgress();
+    const estateGrid = new Map();
+    MapGenerator.generateEstateMap(estateGrid);
+    estateManager.init(estateGrid, game.player.estate.name);
+    
+    if (game.player.estate.backgroundUrl) {
+        ui.estate.container.style.backgroundImage = `url(${game.player.estate.backgroundUrl})`;
+    } else {
+        ui.estate.container.style.backgroundImage = '';
+    }
+
+
+    ui.worldMap.modal.classList.add('hidden');
+    ui.estateSetup.modal.classList.add('hidden');
+    ui.estate.container.classList.remove('hidden');
+    ui.inventory.ui.classList.remove('hidden');
+    ui.storage.ui.classList.remove('hidden');
+    ui.production.ui.classList.remove('hidden');
+    estateManager.resizeAndCenter();
+    updateGameUI();
+}
+
+
+function showMainMenu() {
+    game.currentView = 'menu';
+    ui.worldMap.modal.classList.add('hidden');
+    ui.estate.container.classList.add('hidden');
+    ui.inventory.ui.classList.add('hidden');
+    ui.storage.ui.classList.add('hidden');
+    ui.production.ui.classList.add('hidden');
+    ui.mainScreen.classList.remove('hidden');
+}
+
+function setupMainMenu() {
+    ui.mainMenuContent.innerHTML = `
+        <h1 class="text-4xl font-cinzel mb-4">The Estate</h1>
+        <p class="mb-4 text-gray-300">Provide a URL to an image to generate a world map, or load a previously saved one.</p>
+        <div class="mb-4 text-left">
+            <label for="image-url-input" class="block mb-2 text-sm font-bold">Image URL</label>
+            <input type="text" id="image-url-input" class="w-full bg-gray-800 border border-gray-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-cyan-500" value="https://i.ibb.co/Wb2yFFt/AAB99-D44-0734-4857-9884-CD2-BD14-D8804.jpg">
+        </div>
+        <button id="generate-world-btn" class="glass-button text-xl font-cinzel px-8 py-3 rounded-lg w-full mb-4">Generate New World</button>
+        <div class="flex gap-4">
+            <button id="load-world-btn" class="glass-button py-2 rounded-lg w-full">Load Saved World</button>
+            <button id="clear-data-btn" class="glass-button py-2 rounded-lg w-full bg-red-500/20 border-red-500/40 hover:bg-red-500/40">Clear All Data</button>
+        </div>
+        <p id="main-menu-status" class="text-red-400 mt-4 h-6"></p>
+    `;
+    
+    ui.imageUrlInput = document.getElementById('image-url-input');
+    ui.mainMenuStatus = document.getElementById('main-menu-status');
+
+    document.getElementById('generate-world-btn').addEventListener('click', () => {
+        const url = ui.imageUrlInput.value.trim();
+        if (url) {
+            game.player.hasPlacedFirstEstate = false;
+            StorageManager.savePlayer();
+            startWorldGeneration(url);
+        } else {
+            ui.mainMenuStatus.textContent = "Please enter an image URL.";
+        }
+    });
+    document.getElementById('load-world-btn').addEventListener('click', loadExistingWorld);
+    document.getElementById('clear-data-btn').addEventListener('click', () => {
+        if(confirm("Are you sure you want to delete ALL your world, player, and game design data? This cannot be undone.")) {
+            StorageManager.clearAllData();
+            location.reload();
+        }
+    });
+}
+
+function updateGameUI() {
+    // Update Side Panels
+    const invList = ui.inventory.list; 
+    const storeList = ui.storage.list;
+    invList.innerHTML = ''; 
+    storeList.innerHTML = '';
+    
+    const estate = game.player.estate;
+    let maxStorage = 0;
+    if (estate && estate.buildings.warehouse) {
+        const benefit = BuildingManager.getBuildingBenefit(estate.buildings.warehouse.level || estate.buildings.warehouse, 'warehouse');
+        if (benefit && benefit.type === 'STORAGE_CAPACITY' && benefit.details) {
+            maxStorage = benefit.details.amount;
+        }
+    }
+    
+    for (const key in RESOURCES) {
+        const invAmount = game.player.inventory[key] || 0;
+        if (invAmount > 0) invList.innerHTML += `<div>${RESOURCES[key].icon} ${RESOURCES[key].name}: ${invAmount}</div>`;
+        if (estate && estate.storage.hasOwnProperty(key)) {
+            const storeAmount = estate.storage[key] || 0;
+            storeList.innerHTML += `<div>${RESOURCES[key].icon} ${RESOURCES[key].name}: ${storeAmount.toLocaleString()} / ${maxStorage.toLocaleString()}</div>`;
+        }
+    }
+    if (invList.innerHTML === '') invList.innerHTML = '<p class="text-xs opacity-50">Empty</p>';
+    if (storeList.innerHTML === '') storeList.innerHTML = '<p class="text-xs opacity-50">No Estate</p>';
+
+    // Update Left Resource Bar
+    const resourceBar = ui.resourceBarContent;
+    resourceBar.innerHTML = '';
+    let resourceBarContent = `<h4 class="font-bold text-center text-base mb-2">Total Resources</h4>
+                              <div class="flex justify-between items-center font-bold">
+                                <span>💠 World Shards</span>
+                                <span>${game.player.worldShards}</span>
+                              </div>
+                              <hr class="border-gray-600 my-2">`;
+
+    const sortedResources = Object.keys(RESOURCES).sort((a, b) => {
+        const rarityOrder = { "Epic": 0, "Rare": 1, "Refined": 2, "Common": 3 };
+        const rarityA = RESOURCES[a].rarity || "Common";
+        const rarityB = RESOURCES[b].rarity || "Common";
+        if (rarityOrder[rarityA] !== rarityOrder[rarityB]) {
+            return rarityOrder[rarityA] - rarityOrder[rarityB];
+        }
+        return RESOURCES[a].name.localeCompare(RESOURCES[b].name);
+    });
+
+    for (const key of sortedResources) {
+        if (key === 'worldShard') continue;
+        const invAmount = game.player.inventory[key] || 0;
+        const storeAmount = game.player.estate?.storage[key] || 0;
+        const total = invAmount + storeAmount;
+        if (total > 0) {
+            resourceBarContent += `<div class="flex justify-between items-center">
+                                      <span>${RESOURCES[key].icon} ${RESOURCES[key].name}</span>
+                                      <span class="font-semibold">${total.toLocaleString()}</span>
+                                   </div>`;
+        }
+    }
+    resourceBar.innerHTML = resourceBarContent;
+
+    // Update Production UI
+    const productionList = ui.production.list;
+    productionList.innerHTML = '';
+    if(game.currentView === 'estate' && game.player.estate) {
+        let productionContent = '';
+        for(const buildingId in game.player.estate.buildings) {
+            const buildingConfig = GDD.Buildings[buildingId];
+            if(buildingConfig && buildingConfig.type === 'GENERATOR') {
+                const level = game.player.estate.buildings[buildingId].level;
+                const benefit = BuildingManager.getBuildingBenefit(level, buildingId);
+                if(benefit && benefit.type === 'PASSIVE_RATE') {
+                    let amount = benefit.details.amount;
+                    const researchBonus = ResearchManager.getResearchBonus('passiveYield');
+                    if(researchBonus) amount += Math.floor(amount * researchBonus);
+                    productionContent += `<div class="flex justify-between"><span>${RESOURCES[benefit.details.resource].icon} ${RESOURCES[benefit.details.resource].name}</span><span>+${amount}/hr</span></div>`;
+                }
+            }
+        }
+        productionList.innerHTML = productionContent;
+    }
+}
+
+function gatherResource(hex) {
+    if (hex.feature?.amount > 0) {
+        const resourceId = hex.feature.resourceId; 
+        let amountToGather = 1;
+        const researchBonus = ResearchManager.getResearchBonus('resourceYield');
+        if (researchBonus) amountToGather += Math.floor(amountToGather * researchBonus);
+
+        hex.feature.amount -= 1; // Always consume 1 from the node
+        game.player.inventory[resourceId] = (game.player.inventory[resourceId] || 0) + amountToGather;
+        if (hex.feature.amount <= 0) delete hex.feature;
+        updateGameUI();
+        StorageManager.saveWorld(worldManager.grid, worldManager.image.src);
+    }
+}
+
+function purchaseEstate() {
+    if (game.player.level < 250) { alert("You must be level 250 to purchase an estate."); return; }
+    game.player.estate = { isOwned: true, name: "My Estate", description: "", hasBeenSetup: false, backgroundUrl: "", lastUpdated: Math.floor(Date.now() / 1000), taxRate: 0.30, storage: { dragonboneTimber: 0, primordialMire: 0, earthRootRock: 0, dwarfForgedIron: 0, rawhide: 0, ironIngot: 0, tannedLeather: 0, duneTitanDust: 0 }, buildings: { townHall: 1, warehouse: 1, lumberMill: 1, mine: 1, quarry: 1, blacksmith: 1, tannery: 1, researchLab: 1, bank: 1, questBoard: 1, barracks: 1 } };
+    // Initialize generator data
+    for(const buildingId in game.player.estate.buildings) {
+        if(GDD.Buildings[buildingId]?.type === 'GENERATOR') {
+            game.player.estate.buildings[buildingId] = { level: 1, uncollected: 0, lastCollected: Math.floor(Date.now() / 1000) };
+        }
+    }
+    StorageManager.savePlayer();
+}
+
+function calculateOfflineProgress() {
+    const estate = game.player.estate; if (!estate) return;
+    const now = Math.floor(Date.now() / 1000);
+    
+    for(const buildingId in estate.buildings) {
+        const buildingData = estate.buildings[buildingId];
+        const buildingConfig = GDD.Buildings[buildingId];
+        if(buildingConfig?.type === 'GENERATOR' && typeof buildingData === 'object') {
+            const secondsPassed = now - buildingData.lastCollected;
+            const hoursPassed = secondsPassed / 3600;
+            
+            const benefit = BuildingManager.getBuildingBenefit(buildingData.level, buildingId);
+            if (benefit && benefit.type === 'PASSIVE_RATE') {
+                let amountGenerated = benefit.details.amount * hoursPassed;
+                const researchBonus = ResearchManager.getResearchBonus('passiveYield');
+                if(researchBonus) amountGenerated += amountGenerated * researchBonus;
+                
+                const capacity = benefit.details.amount * 24;
+                buildingData.uncollected = Math.min(buildingData.uncollected + amountGenerated, capacity);
+                buildingData.lastCollected = now;
+            }
+        }
+    }
+    estate.lastUpdated = now;
+    StorageManager.savePlayer();
+}
+
+const BuildingManager = {
+    showUpgradeModal(buildingId) {
+        const building = GDD.Buildings[buildingId]; if(!building) return;
+        const currentLevel = game.player.estate.buildings[buildingId]?.level || game.player.estate.buildings[buildingId] || 0;
+        const nextLevel = currentLevel + 1; const upgradeData = building.upgrades[nextLevel];
+        let content = `<h3 class="text-2xl font-cinzel mb-2">${building.name}</h3><p class="text-sm mb-4">Current Level: ${currentLevel}</p>`;
+        if (upgradeData) {
+            content += `<h4 class="font-bold mb-2">Upgrade to Level ${nextLevel}</h4>`; let canUpgrade = true;
+            if (upgradeData.requires) {
+                content += `<p class="text-xs mb-1">Requirements:</p><ul class="text-xs list-disc list-inside mb-2">`;
+                for (const reqKey in upgradeData.requires) {
+                    const requiredLevel = upgradeData.requires[reqKey]; const playerLevel = game.player.estate.buildings[reqKey]?.level || game.player.estate.buildings[reqKey] || 0;
+                    const hasReq = playerLevel >= requiredLevel; if (!hasReq) canUpgrade = false;
+                    content += `<li class="${hasReq ? 'text-green-400' : 'text-red-400'}">${GDD.Buildings[reqKey].name} Level ${requiredLevel}</li>`;
+                } content += `</ul>`;
+            }
+            content += `<p class="text-xs mb-1">Cost:</p><ul class="text-xs list-disc list-inside mb-4">`;
+             for (const resKey in upgradeData.cost) {
+                const requiredAmount = upgradeData.cost[resKey]; const playerAmount = game.player.estate.storage[resKey] || 0;
+                const hasRes = playerAmount >= requiredAmount; if (!hasRes) canUpgrade = false;
+                content += `<li class="${hasRes ? 'text-green-400' : 'text-red-400'}">${RESOURCES[resKey].name}: ${requiredAmount.toLocaleString()}</li>`;
+            } content += `</ul>`;
+            content += `<p class="text-xs mb-1">Benefit:</p><p class="text-green-400">${this.getBenefitText(upgradeData.benefit)}</p>`;
+            content += `<button id="confirm-upgrade-btn" class="glass-button w-full mt-6 py-2 rounded-lg" ${!canUpgrade ? 'disabled' : ''}>Upgrade</button>`;
+        } else { content += `<p>This building is at its maximum level.</p>`; }
+        ui.buildingUpgrade.content.innerHTML = content;
+        if(document.getElementById('confirm-upgrade-btn')) { document.getElementById('confirm-upgrade-btn').onclick = () => this.performUpgrade(buildingId); }
+        ui.buildingUpgrade.modal.classList.remove('hidden');
+    },
+    performUpgrade(buildingId) {
+        const buildingData = game.player.estate.buildings[buildingId];
+        const currentLevel = buildingData?.level || buildingData;
+        const nextLevel = currentLevel + 1; 
+        const upgradeData = GDD.Buildings[buildingId].upgrades[nextLevel];
+        for (const resKey in upgradeData.cost) { game.player.estate.storage[resKey] -= upgradeData.cost[resKey]; }
+        if(typeof buildingData === 'object') {
+            buildingData.level = nextLevel;
+        } else {
+            game.player.estate.buildings[buildingId] = nextLevel;
+        }
+        StorageManager.savePlayer(); updateGameUI(); ui.buildingUpgrade.modal.classList.add('hidden');
+        estateManager.showMessage(`${GDD.Buildings[buildingId].name} upgraded to Level ${nextLevel}!`);
+    },
+    getBenefitText(benefit) {
+        if(!benefit) return "No further benefit.";
+        switch(benefit.type) {
+            case 'TIER_UNLOCK': return `Unlocks Building Tier ${benefit.details.tier}`; case 'STORAGE_CAPACITY': return `Increases max resource storage to ${benefit.details.amount.toLocaleString()}`; case 'PASSIVE_RATE': return `Generates ${benefit.details.amount}/hr of ${RESOURCES[benefit.details.resource].name}`; case 'PLAYER_STAT': return `+${benefit.details.value} to ${benefit.details.stat}`; default: return "A mysterious new power.";
+        }
+    },
+    getBuildingBenefit(level, buildingId) { if(!level || !buildingId || !GDD.Buildings[buildingId]) return null; return GDD.Buildings[buildingId].upgrades[level]?.benefit; },
+    showGeneratorModal(buildingId) {
+        const buildingData = game.player.estate.buildings[buildingId];
+        const buildingConfig = GDD.Buildings[buildingId];
+        const content = `
+            <h3 class="text-2xl font-cinzel mb-2">${buildingConfig.name}</h3>
+            <p class="text-sm mb-4">Level: ${buildingData.level}</p>
+            <p class="mb-4">Uncollected: ${Math.floor(buildingData.uncollected).toLocaleString()} ${RESOURCES[buildingConfig.upgrades[buildingData.level].benefit.details.resource].icon}</p>
+            <div class="flex gap-4">
+                <button class="glass-button w-full py-2 rounded-lg" onclick="BuildingManager.collectFromGenerator('${buildingId}')">Collect</button>
+                <button class="glass-button w-full py-2 rounded-lg" onclick="BuildingManager.showUpgradeModal('${buildingId}'); ui.generatorModal.modal.classList.add('hidden');">Upgrade</button>
+            </div>
+        `;
+        ui.generatorModal.content.innerHTML = content;
+        ui.generatorModal.modal.classList.remove('hidden');
+    },
+    collectFromGenerator(buildingId) {
+        const buildingData = game.player.estate.buildings[buildingId];
+        const resourceId = GDD.Buildings[buildingId].upgrades[buildingData.level].benefit.details.resource;
+        const amount = Math.floor(buildingData.uncollected);
+        game.player.estate.storage[resourceId] = (game.player.estate.storage[resourceId] || 0) + amount;
+        buildingData.uncollected -= amount;
+        StorageManager.savePlayer();
+        updateGameUI();
+        ui.generatorModal.modal.classList.add('hidden');
+        estateManager.showMessage(`Collected ${amount.toLocaleString()} ${RESOURCES[resourceId].name}.`);
+    },
+    depositAll() {
+        if(!game.player.estate) return;
+        for (const resKey in game.player.inventory) {
+            game.player.estate.storage[resKey] = (game.player.estate.storage[resKey] || 0) + game.player.inventory[resKey];
+        }
+        game.player.inventory = {};
+        StorageManager.savePlayer();
+        updateGameUI();
+        if(game.currentView === 'estate') BankManager.renderBankUI();
+    },
+    withdrawResource(resKey) {
+        if(!game.player.estate) return;
+        const amountStr = prompt(`How much ${RESOURCES[resKey].name} to withdraw?`, '100');
+        if (amountStr) {
+            const amount = parseInt(amountStr, 10);
+            if (!isNaN(amount) && amount > 0 && (game.player.estate.storage[resKey] || 0) >= amount) {
+                game.player.estate.storage[resKey] -= amount;
+                game.player.inventory[resKey] = (game.player.inventory[resKey] || 0) + amount;
+                StorageManager.savePlayer();
+                updateGameUI();
+                if(game.currentView === 'estate') BankManager.renderBankUI();
+            } else {
+                alert("Invalid amount or not enough in storage.");
+            }
+        }
+    }
+};
+
+const ResearchManager = {
+    currentTreeView: 'main', // 'main' or a treeId like 'combat'
+    upgradeModalReturnContext: null,
+
+    showResearchModal() {
+        this.renderResearchHub();
+        ui.researchLab.modal.classList.remove('hidden');
+    },
+    renderResearchHub() {
+        this.currentTreeView = 'main';
+        const container = ui.researchLab.content;
+        container.innerHTML = `<h1 class="text-4xl font-cinzel mb-6 text-center">Research Cottage</h1>`;
+        const tiers = {
+            'Combat Expertise': 'combat',
+            'Economy': 'economy',
+            'Growth': 'growth'
+        };
+
+        let hubContent = '<div class="flex justify-around items-center">';
+        Object.entries(tiers).forEach(([title, treeId]) => {
+            const tree = GDD.Research[treeId];
+            let totalLevels = 0;
+            let currentLevels = 0;
+            for (const researchId in tree.items) {
+                const item = tree.items[researchId];
+                totalLevels += Object.keys(item.upgrades).length;
+                currentLevels += game.player.research[researchId] || 0;
+            }
+            const progress = totalLevels > 0 ? (currentLevels / totalLevels) * 100 : 0;
+
+            hubContent += `<div class="research-item my-4" onclick="ResearchManager.showResearchTree('${treeId}')">
+                <div class="research-icon">${tree.icon}</div>
+                <span class="text-lg font-bold">${tree.name}</span>
+                <div class="progress-bar-bg"><div class="progress-bar-fill" style="width: ${progress}%"></div></div>
+                <span class="text-sm">${progress.toFixed(0)}%</span>
+            </div>`;
+        });
+        hubContent += '</div>';
+        container.innerHTML += hubContent;
+    },
+    showResearchTree(treeId) {
+        this.currentTreeView = treeId;
+        const container = ui.researchLab.content;
+        const tree = GDD.Research[treeId];
+        container.innerHTML = `<div class="flex items-center mb-6">
+            <button class="glass-button mr-4" onclick="ResearchManager.renderResearchHub()">← Back</button>
+            <h1 class="text-3xl font-cinzel text-center flex-grow">${tree.name}</h1>
+        </div>`;
+        
+        const treeContainer = document.createElement('div');
+        treeContainer.className = 'space-y-8';
+        
+        let itemsHtml = '';
+        for (const researchId in tree.items) {
+            const item = tree.items[researchId];
+            const currentLevel = game.player.research[researchId] || 0;
+            const maxLevel = Object.keys(item.upgrades).length;
+            
+            itemsHtml += `<div class="research-item" onclick="ResearchManager.showResearchDetails('${researchId}')">
+                <div class="research-icon">${item.icon}</div>
+                <span class="text-sm font-bold">${item.name}</span>
+                <div class="progress-bar-bg"><div class="progress-bar-fill" style="width: ${(currentLevel/maxLevel)*100}%"></div></div>
+                <span class="text-xs">${currentLevel}/${maxLevel}</span>
+            </div>`;
+        }
+        treeContainer.innerHTML = `<div class="grid grid-cols-3 gap-y-8 gap-x-4">${itemsHtml}</div>`;
+        container.appendChild(treeContainer);
+    },
+    showResearchDetails(researchId) {
+        this.upgradeModalReturnContext = { type: 'research', treeId: this.currentTreeView };
+        ui.researchLab.modal.classList.add('hidden');
+        
+        const tree = Object.values(GDD.Research).find(t => t.items[researchId]);
+        const item = tree.items[researchId];
+        const currentLevel = game.player.research[researchId] || 0;
+        const nextLevel = currentLevel + 1;
+        const upgradeData = item.upgrades[nextLevel];
+
+        let content = `<h3 class="text-2xl font-cinzel mb-2">${item.name}</h3>
+                       <p class="text-sm mb-4">Current Level: ${currentLevel}</p>
+                       <p class="text-sm text-green-400">Current Bonus: +${(item.upgrades[currentLevel]?.bonus || 0) * 100}%</p>`;
+
+        if (upgradeData) {
+            content += `<hr class="my-4 border-gray-600">
+                        <h4 class="font-bold mb-2">Upgrade to Level ${nextLevel}</h4>
+                        <p class="text-xs mt-2">Next Bonus: +${upgradeData.bonus * 100}%</p>
+                        <p class="text-xs">Cost: ${Object.entries(upgradeData.cost).map(([res, val]) => `${val.toLocaleString()} ${RESOURCES[res].icon}`).join(', ')}</p>
+                        <button id="confirm-research-upgrade" class="glass-button w-full mt-6 py-2 rounded-lg">Research</button>`;
+        } else {
+            content += `<p class="text-xs mt-2 text-yellow-400">Max Level Reached</p>`;
+        }
+        ui.buildingUpgrade.content.innerHTML = content;
+        if(document.getElementById('confirm-research-upgrade')) {
+            document.getElementById('confirm-research-upgrade').onclick = () => ResearchManager.attemptUpgrade(researchId);
+        }
+        ui.buildingUpgrade.modal.classList.remove('hidden');
+    },
+    attemptUpgrade(researchId) {
+        const currentLevel = game.player.research[researchId] || 0;
+        const nextLevel = currentLevel + 1;
+        let upgradeData;
+        let treeId;
+        for(const tId in GDD.Research) {
+            if(GDD.Research[tId].items[researchId]) {
+                upgradeData = GDD.Research[tId].items[researchId].upgrades[nextLevel];
+                treeId = tId;
+                break;
+            }
+        }
+
+        if (!upgradeData) return;
+
+        let canAfford = true;
+        for (const resKey in upgradeData.cost) {
+            if ((game.player.estate.storage[resKey] || 0) < upgradeData.cost[resKey]) {
+                canAfford = false;
+                break;
+            }
+        }
+
+        if (canAfford) {
+            for (const resKey in upgradeData.cost) {
+                game.player.estate.storage[resKey] -= upgradeData.cost[resKey];
+            }
+            game.player.research[researchId] = nextLevel;
+            StorageManager.savePlayer();
+            updateGameUI();
+            ui.buildingUpgrade.modal.classList.add('hidden');
+            this.showResearchModal();
+            this.showResearchTree(treeId);
+        } else {
+            estateManager.showMessage("Not enough resources in Estate Storage.");
+        }
+    },
+    getResearchBonus(researchId) {
+        const level = game.player.research[researchId] || 0;
+        if (level === 0) return 0;
+        for(const treeId in GDD.Research) {
+            const tree = GDD.Research[treeId];
+            if(tree.items[researchId]) {
+                return tree.items[researchId].upgrades[level]?.bonus || 0;
+            }
+        }
+        return 0;
+    }
+};
+
+const BankManager = {
+    showBankModal() {
+        this.renderBankUI();
+        ui.bank.modal.classList.remove('hidden');
+    },
+    renderBankUI() {
+        const container = ui.bank.container;
+        container.innerHTML = '';
+
+        let inventoryHtml = `<div class="border border-gray-700 p-4 rounded-lg">
+            <h3 class="text-xl font-cinzel mb-4">Inventory (At Risk)</h3>
+            <div class="space-y-2">`;
+        for(const resKey in game.player.inventory) {
+            const amount = game.player.inventory[resKey];
+            if(amount > 0) {
+                inventoryHtml += `<div class="flex justify-between items-center">
+                    <span>${RESOURCES[resKey].icon} ${RESOURCES[resKey].name}: ${amount.toLocaleString()}</span>
+                    <button class="glass-button text-xs px-2 py-1 rounded" onclick="BankManager.deposit('${resKey}')">Deposit</button>
+                </div>`;
+            }
+        }
+        inventoryHtml += `</div><button class="glass-button w-full mt-4 py-2 rounded-lg" onclick="BuildingManager.depositAll()">Deposit All</button></div>`;
+
+        let storageHtml = `<div class="border border-gray-700 p-4 rounded-lg">
+            <h3 class="text-xl font-cinzel mb-4">Estate Storage (Safe)</h3>
+            <div class="space-y-2">`;
+        for(const resKey in game.player.estate.storage) {
+             const amount = game.player.estate.storage[resKey];
+            if(amount > 0) {
+                storageHtml += `<div class="flex justify-between items-center">
+                    <span>${RESOURCES[resKey].icon} ${RESOURCES[resKey].name}: ${amount.toLocaleString()}</span>
+                    <button class="glass-button text-xs px-2 py-1 rounded" onclick="BuildingManager.withdrawResource('${resKey}')">Withdraw</button>
+                </div>`;
+            }
+        }
+         storageHtml += `</div></div>`;
+        
+        container.innerHTML = inventoryHtml + storageHtml;
+    },
+    deposit(resKey) {
+        const amountStr = prompt(`How much ${RESOURCES[resKey].name} to deposit?`, game.player.inventory[resKey]);
+        if (amountStr) {
+            const amount = parseInt(amountStr, 10);
+            if (!isNaN(amount) && amount > 0 && game.player.inventory[resKey] >= amount) {
+                game.player.inventory[resKey] -= amount;
+                if(game.player.inventory[resKey] === 0) delete game.player.inventory[resKey];
+                game.player.estate.storage[resKey] = (game.player.estate.storage[resKey] || 0) + amount;
+                StorageManager.savePlayer();
+                updateGameUI();
+                this.renderBankUI();
+            } else {
+                alert("Invalid amount.");
+            }
+        }
+    }
+};
+
+const QuestManager = {
+    showQuestModal() {
+        this.generateAndDisplayQuest();
+        ui.questBoard.modal.classList.remove('hidden');
+    },
+    async generateAndDisplayQuest() {
+        const contentDiv = ui.questBoard.content;
+        contentDiv.innerHTML = `<div class="text-center">Loading new quest...</div>`;
+        
+        try {
+            const availableBuildings = Object.keys(game.player.estate.buildings).join(', ');
+            const prompt = `You are a quest master in a fantasy world. Generate a quest for a player. The player's estate has the following buildings: ${availableBuildings}. The quest should be thematic to these buildings. Return a JSON object with the following structure: { "title": "string", "description": "string", "objective": "string", "reward": { "resource": "string", "amount": "number" } }. The resource for the reward must be one of: dragonboneTimber, primordialMire, earthRootRock, dwarfForgedIron, rawhide.`;
+
+            const chatHistory = [{ role: "user", parts: [{ text: prompt }] }];
+            const payload = { 
+                contents: chatHistory,
+                generationConfig: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: "OBJECT",
+                        properties: {
+                            "title": { "type": "STRING" },
+                            "description": { "type": "STRING" },
+                            "objective": { "type": "STRING" },
+                            "reward": {
+                                "type": "OBJECT",
+                                "properties": {
+                                    "resource": { "type": "STRING" },
+                                    "amount": { "type": "NUMBER" }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            const apiKey = "";
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+            const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            const resultText = await response.text();
+            const result = extractJson(resultText);
+            
+            if (result && result.candidates?.[0]?.content?.parts?.[0]?.text) {
+                const quest = extractJson(result.candidates[0].content.parts[0].text);
+                if (!quest) { throw new Error("Could not parse valid quest JSON from AI response."); }
+
+                let rewardHtml = '<p class="text-gray-400">No reward for this quest.</p>';
+                if (quest.reward && quest.reward.amount && quest.reward.resource && RESOURCES[quest.reward.resource]) {
+                    rewardHtml = `<p>${quest.reward.amount.toLocaleString()} ${RESOURCES[quest.reward.resource].icon} ${RESOURCES[quest.reward.resource].name}</p>`;
+                }
+                
+                contentDiv.innerHTML = `
+                    <h2 class="text-3xl font-cinzel mb-4">${quest.title || "Untitled Quest"}</h2>
+                    <p class="mb-4">${quest.description || "No description provided."}</p>
+                    <p class="font-bold mb-2">Objective:</p>
+                    <p class="mb-4 bg-black/20 p-2 rounded">${quest.objective || "No objective defined."}</p>
+                    <p class="font-bold mb-2">Reward:</p>
+                    ${rewardHtml}
+                `;
+            } else {
+                throw new Error("Could not generate a valid quest from the AI.");
+            }
+        } catch(e) {
+            console.error("Quest Generation Error:", e);
+            contentDiv.innerHTML = `<p class="text-red-400">Could not retrieve a quest from the board. Please try again later.</p>`;
+        }
+    }
+};
+
+// --- MAIN GAME LOOP ---
+function animate() {
+    if (game.currentView === 'world') {
+        worldManager.draw();
+    } else if (game.currentView === 'estate') {
+        estateManager.draw();
+    }
+    requestAnimationFrame(animate);
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+    ui = {
+        mainScreen: document.getElementById('main-screen'), mainMenuContent: document.getElementById('main-menu-content'), loadingOverlay: document.getElementById('loading-overlay'), loadingMessage: document.getElementById('loading-message'), inventory: { ui: document.getElementById('inventory-ui'), list: document.getElementById('inventory-list') }, storage: { ui: document.getElementById('storage-ui'), list: document.getElementById('storage-list') }, production: { ui: document.getElementById('production-ui'), list: document.getElementById('production-list') }, resourceSidebar: document.getElementById('resource-sidebar'), resourceBarContent: document.getElementById('resource-bar-content'), toggleSidebarBtn: document.getElementById('toggle-sidebar-btn'), worldMap: { modal: document.getElementById('world-map-modal'), canvas: document.getElementById('map-canvas'), exitBtn: document.getElementById('map-exit-btn'), tooltip: { container: document.getElementById('hex-tooltip'), name: document.getElementById('tooltip-name'), biome: document.getElementById('tooltip-biome'), resource: document.getElementById('tooltip-resource'), gatherBtn: document.getElementById('tooltip-gather-btn'), enterBtn: document.getElementById('tooltip-enter-btn'), moveEstateBtn: document.getElementById('tooltip-move-estate-btn'), foundEstateBtn: document.getElementById('tooltip-found-estate-btn'), harvestShardBtn: document.getElementById('tooltip-harvest-shard-btn') } }, estate: { container: document.getElementById('estate-manager-container'), canvas: document.getElementById('estate-canvas'), exitBtn: document.getElementById('estate-exit-btn'), title: document.getElementById('estate-title'), messageBox: document.getElementById('estate-message-box'), tooltip: { container: document.getElementById('estate-tooltip'), name: document.getElementById('estate-tooltip-name'), level: document.getElementById('estate-tooltip-level') } }, buildingUpgrade: { modal: document.getElementById('building-upgrade-modal'), content: document.getElementById('upgrade-modal-content'), closeBtn: document.getElementById('close-upgrade-modal-btn') }, estateSetup: { modal: document.getElementById('estate-setup-modal'), nameInput: document.getElementById('estate-name-input'), descInput: document.getElementById('estate-desc-input'), aiDescBtn: document.getElementById('ai-desc-btn'), aiNameBtn: document.getElementById('ai-name-btn'), nameSuggestions: document.getElementById('name-suggestions'), confirmBtn: document.getElementById('confirm-estate-setup-btn'), statusMsg: document.getElementById('setup-status-message') }, researchLab: { modal: document.getElementById('research-lab-modal'), content: document.getElementById('research-lab-content'), closeBtn: document.getElementById('close-research-modal-btn') }, devTools: { openBtn: document.getElementById('dev-tools-btn'), recenterBtn: document.getElementById('recenter-btn'), panToEstateBtn: document.getElementById('pan-to-estate-btn') }, generatorModal: { modal: document.getElementById('generator-modal'), content: document.getElementById('generator-modal-content'), closeBtn: document.getElementById('close-generator-modal-btn') }, bank: { modal: document.getElementById('estate-bank-modal'), container: document.getElementById('bank-container'), closeBtn: document.getElementById('close-bank-modal-btn') }, questBoard: { modal: document.getElementById('quest-board-modal'), content: document.getElementById('quest-board-content'), closeBtn: document.getElementById('close-quest-board-btn') },
+        gddEditor: {
+            modal: document.getElementById('gdd-editor-modal'),
+            sidebar: document.getElementById('gdd-sidebar'),
+            contentArea: document.getElementById('gdd-content-area'),
+            contentScroll: document.getElementById('gdd-content-scroll'),
+            contentTitle: document.getElementById('gdd-content-title'),
+            saveBtn: document.getElementById('gdd-save-btn'),
+            closeBtn: document.getElementById('gdd-close-btn'),
+        }
+    };
+    
+    StorageManager.loadGDD();
+    worldManager = new WorldMap(ui.worldMap.canvas); 
+    estateManager = new EstateMap(ui.estate.canvas);
+    StorageManager.loadPlayer();
+    ui.worldMap.exitBtn.addEventListener('click', showMainMenu); ui.estate.exitBtn.addEventListener('click', showWorld); ui.buildingUpgrade.closeBtn.addEventListener('click', () => {
+        ui.buildingUpgrade.modal.classList.add('hidden');
+        if (ResearchManager.upgradeModalReturnContext) {
+            const context = ResearchManager.upgradeModalReturnContext;
+            ResearchManager.showResearchModal();
+            ResearchManager.showResearchTree(context.treeId);
+            ResearchManager.upgradeModalReturnContext = null;
+        }
+    });
+    ui.researchLab.closeBtn.addEventListener('click', () => ui.researchLab.modal.classList.add('hidden'));
+    ui.generatorModal.closeBtn.addEventListener('click', () => ui.generatorModal.modal.classList.add('hidden'));
+    ui.bank.closeBtn.addEventListener('click', () => ui.bank.modal.classList.add('hidden'));
+    ui.questBoard.closeBtn.addEventListener('click', () => ui.questBoard.modal.classList.add('hidden'));
+    
+    ui.toggleSidebarBtn.addEventListener('click', () => {
+        ui.resourceSidebar.classList.toggle('collapsed');
+        localStorage.setItem('sidebarCollapsed', ui.resourceSidebar.classList.contains('collapsed'));
+    });
+
+    if (localStorage.getItem('sidebarCollapsed') === 'true') {
+        ui.resourceSidebar.classList.add('collapsed');
+    }
+    
+    ui.devTools.recenterBtn.addEventListener('click', () => {
+        worldManager.isCameraLocked = true;
+    });
+    ui.devTools.panToEstateBtn.addEventListener('click', () => {
+        const estateHex = Array.from(worldManager.grid.values()).find(h => h.feature?.type === 'estate_plot');
+        if(estateHex) {
+            worldManager.centerOnHex(estateHex.q, estateHex.r);
+        } else {
+            alert("Estate not placed yet!");
+        }
+    });
+
+    // --- Initialize GDD Editor ---
+    GddEditor.init();
+
+
+    // Estate Setup Listeners
+    ui.estateSetup.aiDescBtn.addEventListener('click', async () => {
+        const btn = ui.estateSetup.aiDescBtn;
+        btn.disabled = true;
+        btn.textContent = "Generating...";
+        try {
+            const prompt = "Generate a short, evocative description for a fantasy estate in a single paragraph.";
+            const chatHistory = [{ role: "user", parts: [{ text: prompt }] }];
+            const payload = { contents: chatHistory };
+            const apiKey = "";
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+            const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            const resultText = await response.text();
+            const result = extractJson(resultText);
+
+            if (result && result.candidates?.[0]?.content?.parts?.[0]?.text) {
+                ui.estateSetup.descInput.value = result.candidates[0].content.parts[0].text;
+            } else if (responseText) {
+                ui.estateSetup.descInput.value = responseText.replace(/```/g, "").trim();
+            } else {
+                throw new Error("Invalid or empty response from AI.");
+            }
+        } catch (error) {
+            console.error("AI Description Error:", error);
+            ui.estateSetup.statusMsg.textContent = "Could not generate description.";
+        } finally {
+            btn.disabled = false;
+            btn.textContent = "✨ Generate AI Description";
+        }
+    });
+    
+    ui.estateSetup.aiNameBtn.addEventListener('click', async () => {
+        const btn = ui.estateSetup.aiNameBtn;
+        btn.disabled = true;
+        btn.textContent = "Suggesting...";
+        try {
+            const description = ui.estateSetup.descInput.value.trim() || 'a generic fantasy castle';
+            const prompt = `Generate 5 cool, one-or-two-word names for a fantasy estate based on this description: "${description}". Return a JSON object with a single key "names" which is an array of strings.`;
+            const chatHistory = [{ role: "user", parts: [{ text: prompt }] }];
+            const payload = { 
+                contents: chatHistory,
+                generationConfig: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: "OBJECT",
+                        properties: { "names": { "type": "ARRAY", "items": { "type": "STRING" } } }
+                    }
+                }
+            };
+            const apiKey = "";
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+            const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            const resultText = await response.text();
+            const result = extractJson(resultText);
+
+            if (result && result.candidates?.[0]?.content?.parts?.[0]?.text) {
+                const nameData = extractJson(result.candidates[0].content.parts[0].text);
+                if (!nameData || !nameData.names) { throw new Error("Could not parse valid names JSON from AI response.");}
+                const names = nameData.names;
+                const suggestionsContainer = ui.estateSetup.nameSuggestions;
+                suggestionsContainer.innerHTML = '';
+                names.forEach(name => {
+                    const nameBtn = document.createElement('button');
+                    nameBtn.className = 'glass-button text-sm px-3 py-1 rounded-full';
+                    nameBtn.textContent = name;
+                    nameBtn.onclick = () => { ui.estateSetup.nameInput.value = name; };
+                    suggestionsContainer.appendChild(nameBtn);
+                });
+            } else { throw new Error("Invalid response from AI."); }
+        } catch (error) {
+            console.error("AI Name Suggestion Error:", error);
+            ui.estateSetup.statusMsg.textContent = "Could not suggest names.";
+        } finally {
+            btn.disabled = false;
+            btn.textContent = "✨ Suggest Names";
+        }
+    });
+
+    ui.estateSetup.confirmBtn.addEventListener('click', async () => {
+        const btn = ui.estateSetup.confirmBtn;
+        const name = ui.estateSetup.nameInput.value.trim();
+        const description = ui.estateSetup.descInput.value.trim();
+        if (!name || !description) {
+            ui.estateSetup.statusMsg.textContent = "Name and description are required.";
+            return;
+        }
+        btn.disabled = true;
+        ui.estateSetup.statusMsg.textContent = "Generating your estate's vista...";
+        showLoading("Generating Estate Background...");
+
+        try {
+            const prompt = `A beautiful, detailed fantasy painting of ${description}. Cinematic lighting, epic view.`;
+            const payload = { instances: [{ prompt: prompt }], parameters: { "sampleCount": 1} };
+            const apiKey = "";
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${apiKey}`;
+            const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            const result = await response.json();
+            if (result.predictions?.[0]?.bytesBase64Encoded) {
+                game.player.estate.name = name;
+                game.player.estate.description = description;
+                game.player.estate.backgroundUrl = `data:image/png;base64,${result.predictions[0].bytesBase64Encoded}`;
+                game.player.estate.hasBeenSetup = true;
+                StorageManager.savePlayer();
+                hideLoading();
+                loadEstateView();
+            } else { throw new Error("Invalid image response from AI."); }
+        } catch (error) {
+            console.error("AI Image Generation Error:", error);
+            ui.estateSetup.statusMsg.textContent = "Could not generate the estate background. Please try again.";
+            hideLoading();
+        } finally {
+            btn.disabled = false;
+        }
+    });
+
+    setupMainMenu();
+    animate();
+});
+
+// --- New GDD Editor Logic ---
+const GddEditor = {
+    SELECT_OPTIONS: {
+        'benefit.type': ['TIER_UNLOCK', 'STORAGE_CAPACITY', 'PASSIVE_RATE', 'PLAYER_STAT', 'UNLOCK', 'REFINEMENT'],
+        'benefit.details.resource': () => Object.keys(GDD.Resources), // Use a function to get latest keys
+        'cost.resource': () => Object.keys(GDD.Resources),
+        'rarity': () => Object.keys(GDD.RarityWeights),
+    },
+    
+    init() {
+        ui.devTools.openBtn.addEventListener('click', () => this.open());
+        ui.gddEditor.closeBtn.addEventListener('click', () => this.close());
+        ui.gddEditor.saveBtn.addEventListener('click', () => this.saveChanges());
+    },
+
+    open() {
+        this.renderSidebar();
+        this.renderContent(Object.keys(GDD)[0]);
+        ui.gddEditor.modal.classList.remove('hidden');
+        ui.gddEditor.modal.classList.add('flex', 'items-center', 'justify-center');
+    },
+
+    close() {
+        ui.gddEditor.modal.classList.add('hidden');
+        ui.gddEditor.modal.classList.remove('flex', 'items-center', 'justify-center');
+    },
+    
+    renderSidebar() {
+        const sidebar = ui.gddEditor.sidebar;
+        sidebar.innerHTML = '';
+        // Render GDD tabs
+        for (const key in GDD) {
+            const tab = document.createElement('button');
+            tab.className = 'gdd-tab block w-full text-left p-3 border-r-4 border-transparent hover:bg-gray-700/50 transition-colors';
+            tab.textContent = key.replace(/([A-Z])/g, ' $1').trim(); // Add spaces before caps
+            tab.dataset.key = key;
+            tab.onclick = () => this.renderContent(key);
+            sidebar.appendChild(tab);
+        }
+        // Add separator and Testing tab
+        sidebar.innerHTML += `<hr class="border-gray-600 my-2">`;
+        const testingTab = document.createElement('button');
+        testingTab.className = 'gdd-tab block w-full text-left p-3 border-r-4 border-transparent hover:bg-gray-700/50 transition-colors';
+        testingTab.textContent = "Testing";
+        testingTab.dataset.key = "Testing";
+        testingTab.onclick = () => this.renderContent('Testing');
+        sidebar.appendChild(testingTab);
+
+        sidebar.firstChild?.classList.add('active');
+    },
+
+    renderContent(key) {
+        // Update active tab in sidebar
+        document.querySelectorAll('#gdd-sidebar .gdd-tab').forEach(t => t.classList.remove('active'));
+        document.querySelector(`#gdd-sidebar .gdd-tab[data-key="${key}"]`).classList.add('active');
+        
+        ui.gddEditor.contentTitle.textContent = key.replace(/([A-Z])/g, ' $1').trim();
+        const contentArea = ui.gddEditor.contentScroll;
+        contentArea.innerHTML = '';
+        
+        // Special case for the Testing tab
+        if (key === 'Testing') {
+            this.renderTestingTab(contentArea);
+            ui.gddEditor.saveBtn.classList.add('hidden'); // Hide save button for this tab
+            return;
+        }
+        
+        ui.gddEditor.saveBtn.classList.remove('hidden'); // Show save button for GDD tabs
+        const data = GDD[key];
+        
+        if (Array.isArray(data)) {
+            this.renderAccordionList(contentArea, key, data);
+        } else if (typeof data === 'object' && data !== null) {
+            const firstValue = Object.values(data)[0];
+            if (typeof firstValue === 'object' && firstValue !== null && !Array.isArray(firstValue)) {
+                 this.renderObjectAsAccordionList(contentArea, key, data);
+            } else {
+                contentArea.appendChild(this._createFormForObject(data, key));
+            }
+        }
+    },
+    
+    renderObjectAsAccordionList(container, key, dataObject) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'space-y-2';
+
+        const header = document.createElement('div');
+        header.className = 'flex justify-end mb-4';
+        const addButton = document.createElement('button');
+        addButton.className = 'glass-button px-3 py-1 rounded-md';
+        addButton.textContent = `+ Add New ${key.slice(0, -1)}`;
+        addButton.onclick = () => this.addNewItem(key);
+        header.appendChild(addButton);
+        container.appendChild(header);
+
+        for (const itemKey in dataObject) {
+            const path = `${key}.${itemKey}`;
+            const accordion = document.createElement('div');
+            accordion.className = 'glass-panel rounded-lg overflow-hidden';
+
+            const accordionHeader = document.createElement('div');
+            accordionHeader.className = 'gdd-accordion-header p-3 flex justify-between items-center';
+            accordionHeader.innerHTML = `<span class="font-bold">${dataObject[itemKey].name || itemKey}</span>
+                                         <button class="glass-button bg-red-500/20 border-red-500/40 hover:bg-red-500/40 px-2 py-0.5 rounded-md text-xs" onclick="GddEditor.deleteItem('${path}')">Delete</button>`;
+            
+            const accordionContent = document.createElement('div');
+            accordionContent.className = 'gdd-accordion-content';
+            accordionContent.appendChild(this._createFormForObject(dataObject[itemKey], path));
+
+            accordionHeader.onclick = (e) => {
+                if (e.target.tagName === 'BUTTON') return;
+                accordionContent.classList.toggle('open');
+            };
+
+            accordion.appendChild(accordionHeader);
+            accordion.appendChild(accordionContent);
+            wrapper.appendChild(accordion);
+        }
+        container.appendChild(wrapper);
+    },
+
+    renderTestingTab(container) {
+        container.innerHTML = `
+            <div class="space-y-6">
+                <div>
+                    <h3 class="text-xl font-cinzel mb-3">Give Resources</h3>
+                    <div id="dev-resource-buttons" class="gdd-form-grid"></div>
+                </div>
+                <div>
+                    <h3 class="text-xl font-cinzel mb-3">Cheats</h3>
+                    <div id="dev-cheat-buttons" class="gdd-form-grid"></div>
+                </div>
+            </div>
+        `;
+
+        // Populate resource buttons
+        const resourceContainer = container.querySelector('#dev-resource-buttons');
+        const addAllBtn = document.createElement('button');
+        addAllBtn.className = 'glass-button py-2 rounded-md';
+        addAllBtn.textContent = 'Add 1k All';
+        addAllBtn.onclick = () => {
+            for(const resKey in RESOURCES) {
+                this.addResource(resKey, 1000);
             }
         };
-        
-        let RESOURCES = GDD.Resources;
-        let game = { 
-            player: { name: "Hero", level: 250, icon: '👾', inventory: {}, estate: null, worldShards: 5, hasPlacedFirstEstate: false, research: {} }, 
-            worldMap: { q: 0, r: 0, selectedHex: null }, 
-            estateMap: { q: 0, r: 0, selectedHex: null }, 
-            currentView: 'menu',
-            dev: { freeMove: false }
-        };
-        let ui, worldManager, estateManager;
+        resourceContainer.appendChild(addAllBtn);
 
-        // Basic functionality for testing - full implementation would require more space
-        document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('main-menu-content').innerHTML = `
-                <h1 class="text-4xl font-cinzel mb-4">Estate & Kingdom Builder</h1>
-                <p class="mb-4 text-gray-300">Enhanced version with GDD Editor, AI integration, and advanced features!</p>
-                <button class="glass-button text-xl font-cinzel px-8 py-3 rounded-lg w-full mb-4">Coming Soon - Full Game Loading...</button>
-                <p class="text-sm text-cyan-300">This is the updated version with all your new features. The complete JavaScript implementation is ready for deployment!</p>
-            `;
+        for(const resKey in RESOURCES) {
+            const btn = document.createElement('button');
+            btn.className = 'glass-button py-2 rounded-md';
+            btn.textContent = `+1k ${RESOURCES[resKey].icon}`;
+            btn.title = `Add 1000 ${RESOURCES[resKey].name}`;
+            btn.onclick = () => this.addResource(resKey, 1000);
+            resourceContainer.appendChild(btn);
+        }
+
+        // Populate cheat buttons
+        const cheatContainer = container.querySelector('#dev-cheat-buttons');
+        const freeMoveBtn = document.createElement('button');
+        freeMoveBtn.id = 'dev-free-move-btn';
+        freeMoveBtn.className = 'glass-button py-2 rounded-md dev-toggle';
+        freeMoveBtn.textContent = `Free Move: ${game.dev.freeMove ? 'ON' : 'OFF'}`;
+        freeMoveBtn.classList.toggle('active', game.dev.freeMove);
+        freeMoveBtn.onclick = () => this.toggleFreeMove();
+        cheatContainer.appendChild(freeMoveBtn);
+    },
+
+    addResource(resKey, amount) {
+        if (game.player.estate) {
+            game.player.estate.storage[resKey] = (game.player.estate.storage[resKey] || 0) + amount;
+            updateGameUI();
+        } else {
+            alert("You must have an estate to add resources.");
+        }
+    },
+
+    toggleFreeMove() {
+        game.dev.freeMove = !game.dev.freeMove;
+        const btn = document.getElementById('dev-free-move-btn');
+        if(btn) {
+            btn.textContent = `Free Move: ${game.dev.freeMove ? 'ON' : 'OFF'}`;
+            btn.classList.toggle('active', game.dev.freeMove);
+        }
+    },
+
+    renderAccordionList(container, key, dataArray) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'space-y-2';
+
+        const header = document.createElement('div');
+        header.className = 'flex justify-end mb-4';
+        const addButton = document.createElement('button');
+        addButton.className = 'glass-button px-3 py-1 rounded-md';
+        addButton.textContent = `+ Add New ${key.slice(0, -1)}`;
+        addButton.onclick = () => this.addNewItem(key);
+        header.appendChild(addButton);
+        container.appendChild(header);
+
+        dataArray.forEach((item, index) => {
+            const path = `${key}[${index}]`;
+            const accordion = document.createElement('div');
+            accordion.className = 'glass-panel rounded-lg overflow-hidden';
+
+            const accordionHeader = document.createElement('div');
+            accordionHeader.className = 'gdd-accordion-header p-3 flex justify-between items-center';
+            accordionHeader.innerHTML = `<span class="font-bold">${item.name || item.id || `Item ${index + 1}`}</span>
+                                         <button class="glass-button bg-red-500/20 border-red-500/40 hover:bg-red-500/40 px-2 py-0.5 rounded-md text-xs" onclick="GddEditor.deleteItem('${path}')">Delete</button>`;
+            
+            const accordionContent = document.createElement('div');
+            accordionContent.className = 'gdd-accordion-content';
+            accordionContent.appendChild(this._createFormForObject(item, path));
+
+            accordionHeader.onclick = (e) => {
+                if (e.target.tagName === 'BUTTON') return;
+                accordionContent.classList.toggle('open');
+            };
+
+            accordion.appendChild(accordionHeader);
+            accordion.appendChild(accordionContent);
+            wrapper.appendChild(accordion);
+        });
+        container.appendChild(wrapper);
+    },
+    
+    _createFormForObject(obj, path) {
+        const formGrid = document.createElement('div');
+        formGrid.className = 'gdd-form-grid';
+
+        for (const key in obj) {
+            const value = obj[key];
+            const currentPath = `${path}.${key}`;
+            
+            if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+                const fieldset = document.createElement('fieldset');
+                fieldset.className = 'col-span-full border border-gray-700 p-3 rounded-md';
+                fieldset.innerHTML = `<legend class="px-2 font-bold text-sm">${key}</legend>`;
+                fieldset.appendChild(this._createFormForObject(value, currentPath));
+                formGrid.appendChild(fieldset);
+            } else {
+                const inputGroup = document.createElement('div');
+                inputGroup.className = 'gdd-input-group';
+                
+                const label = document.createElement('label');
+                label.className = 'text-sm mb-1 opacity-80';
+                label.textContent = key;
+                
+                let input;
+                const inputType = typeof value;
+
+                let isSelect = false;
+                for(const selectKey in this.SELECT_OPTIONS) {
+                    if(currentPath.endsWith(selectKey)) {
+                        let options = this.SELECT_OPTIONS[selectKey];
+                        if (typeof options === 'function') {
+                            options = options();
+                        }
+                        input = this._createSelect(currentPath, options, value);
+                        isSelect = true;
+                        break;
+                    }
+                }
+
+                if (!isSelect) {
+                    switch(inputType) {
+                        case 'string':
+                            if (value.length > 80 || key.toLowerCase().includes('description')) {
+                                input = document.createElement('textarea');
+                                input.className = 'gdd-textarea';
+                                input.rows = 3;
+                            } else {
+                                input = document.createElement('input');
+                                input.type = 'text';
+                                input.className = 'gdd-input';
+                            }
+                            input.value = value;
+                            break;
+                        case 'number':
+                            input = document.createElement('input');
+                            input.type = 'number';
+                            input.className = 'gdd-input';
+                            input.value = value;
+                            break;
+                        case 'boolean':
+                            input = document.createElement('input');
+                            input.type = 'checkbox';
+                            input.className = 'gdd-checkbox';
+                            input.checked = value;
+                            break;
+                        default:
+                            input = document.createElement('input');
+                            input.type = 'text';
+                            input.className = 'gdd-input';
+                            input.value = JSON.stringify(value);
+                            input.disabled = true;
+                    }
+                }
+                
+                input.dataset.path = currentPath;
+                inputGroup.appendChild(label);
+                inputGroup.appendChild(input);
+                formGrid.appendChild(inputGroup);
+            }
+        }
+        return formGrid;
+    },
+
+    _createSelect(path, options, selectedValue) {
+        const select = document.createElement('select');
+        select.className = 'gdd-select';
+        options.forEach(opt => {
+            const optionEl = document.createElement('option');
+            optionEl.value = opt;
+            optionEl.textContent = opt;
+            if (opt === selectedValue) {
+                optionEl.selected = true;
+            }
+            select.appendChild(optionEl);
+        });
+        return select;
+    },
+
+    saveChanges() {
+        const inputs = ui.gddEditor.contentScroll.querySelectorAll('[data-path]');
+        const newGDD = JSON.parse(JSON.stringify(GDD));
+
+        inputs.forEach(input => {
+            const path = input.dataset.path;
+            let value;
+            if (input.type === 'checkbox') {
+                value = input.checked;
+            } else if (input.type === 'number') {
+                value = parseFloat(input.value);
+            } else {
+                value = input.value;
+            }
+            this._setValueByPath(newGDD, path, value);
+        });
+        
+        GDD = newGDD;
+        RESOURCES = GDD.Resources;
+        StorageManager.saveGDD();
+        alert("Game Data Saved!");
+        
+        const currentKey = document.querySelector('#gdd-sidebar .gdd-tab.active').dataset.key;
+        this.renderContent(currentKey);
+    },
+
+    _setValueByPath(obj, path, value) {
+        const keys = path.replace(/\[(\w+)\]/g, '.$1').split('.');
+        const lastKey = keys.pop();
+        const lastObj = keys.reduce((currentObj, key) => currentObj[key] = currentObj[key] || {}, obj);
+        lastObj[lastKey] = value;
+    },
+
+    addNewItem(key) {
+        const data = GDD[key];
+         if (Array.isArray(data)) {
+            const template = data.length > 0 ? JSON.parse(JSON.stringify(data[0])) : {};
+            for(const prop in template) {
+                if(typeof template[prop] === 'string') template[prop] = '';
+                if(typeof template[prop] === 'number') template[prop] = 0;
+                if(typeof template[prop] === 'boolean') template[prop] = false;
+                if(typeof template[prop] === 'object' && template[prop] !== null) template[prop] = {};
+            }
+            if(template.id) template.id = `new_${key.slice(0,-1)}_${Date.now()}`;
+            if(template.name) template.name = "New Item";
+            data.push(template);
+        } else if (typeof data === 'object' && data !== null) {
+            const newKey = prompt("Enter ID for the new item:");
+            if (newKey && !data[newKey]) {
+                const template = Object.keys(data).length > 0 ? JSON.parse(JSON.stringify(data[Object.keys(data)[0]])) : {};
+                 for(const prop in template) {
+                    if(typeof template[prop] === 'string') template[prop] = '';
+                    if(typeof template[prop] === 'number') template[prop] = 0;
+                    if(typeof template[prop] === 'boolean') template[prop] = false;
+                    if(typeof template[prop] === 'object' && template[prop] !== null) template[prop] = {};
+                }
+                if (template.name !== undefined) template.name = "New Item";
+                data[newKey] = template;
+            } else if (newKey) {
+                alert("An item with that ID already exists.");
+            }
+        }
+        this.renderContent(key);
+    },
+
+    deleteItem(path) {
+        if (!confirm(`Are you sure you want to delete the item at path: ${path}? This cannot be undone.`)) return;
+        
+        const keys = path.replace(/\[(\w+)\]/g, '.$1').split('.');
+        const lastKey = keys.pop();
+        
+        let parentObj = GDD;
+        keys.forEach(key => {
+            parentObj = parentObj[key];
         });
 
-        // Note: Full game logic implementation would be added here
-        // The complete code from your message includes all the managers, UI systems, 
-        // GDD editor, AI integration, and advanced game mechanics
+        if (Array.isArray(parentObj)) {
+            parentObj.splice(parseInt(lastKey, 10), 1);
+        } else if (typeof parentObj === 'object' && parentObj !== null) {
+            delete parentObj[lastKey];
+        }
+
+        const currentKey = document.querySelector('#gdd-sidebar .gdd-tab.active').dataset.key;
+        this.renderContent(currentKey);
+    }
+};
     </script>
 </body>
 </html>
